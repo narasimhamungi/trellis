@@ -6,6 +6,13 @@ tagged as Revenues, SalesRevenueNet, or RevenueFromContractWithCustomerExcluding
 depending on filing year and ASC 606 adoption. Each canonical line item below carries an
 ordered list of acceptable XBRL tags; the ingestion module tries them in order and records
 which one actually matched (no silent merging across tags).
+
+Confirmed against live Nike data: 'inventory' started failing for FY2019 onward under
+InventoryNet alone -- same filing where Nike adopted the new revenue-recognition tag,
+suggesting a broader tagging-convention change at that transition, not a data gap.
+InventoryFinishedGoodsNetOfReserves fits Nike's business model (contract manufacturing,
+so only finished-goods inventory on the balance sheet, no raw materials/WIP) and is a
+known convention for footwear/apparel filers reporting a single "Inventories" line.
 """
 
 from dataclasses import dataclass
@@ -48,7 +55,8 @@ SCHEMA: tuple[LineItem, ...] = (
              ("CashAndCashEquivalentsAtCarryingValue",), instant=True),
     LineItem("accounts_receivable", Statement.BALANCE,
              ("AccountsReceivableNetCurrent",), instant=True),
-    LineItem("inventory", Statement.BALANCE, ("InventoryNet",), instant=True),
+    LineItem("inventory", Statement.BALANCE,
+             ("InventoryNet", "InventoryFinishedGoodsNetOfReserves"), instant=True),
     LineItem("assets_current", Statement.BALANCE, ("AssetsCurrent",), instant=True),
     LineItem("ppe_net", Statement.BALANCE,
              ("PropertyPlantAndEquipmentNet",), instant=True),
@@ -72,7 +80,8 @@ SCHEMA: tuple[LineItem, ...] = (
     LineItem("capex", Statement.CASHFLOW,
              ("PaymentsToAcquirePropertyPlantAndEquipment",), instant=False),
     LineItem("depreciation_amortization", Statement.CASHFLOW,
-             ("DepreciationDepletionAndAmortization", "DepreciationAmortizationAndAccretionNet"),
+             ("DepreciationDepletionAndAmortization", "DepreciationAmortizationAndAccretionNet",
+              "DepreciationAndAmortization", "Depreciation"),
              instant=False),
     LineItem("dividends_paid", Statement.CASHFLOW,
              ("PaymentsOfDividendsCommonStock", "PaymentsOfDividends"), instant=False),
