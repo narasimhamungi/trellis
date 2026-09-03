@@ -40,46 +40,138 @@ class Drivers:
     interest_rate: float          # applied to beginning-of-year LT debt balance
     debt_repayment: float         # dollars/year; 0.0 = flat debt
     dividend_payout_ratio: float  # 0.0 = no dividends
-    assumptions: tuple[str, ...] = ()  # non-empty when a driver had to fall back rather
-    # than derive from a reported figure -- e.g. Nike doesn't tag interest_expense as a
-    # standard us-gaap element in its primary statements (only in a supplementary fixed-
-    # charges exhibit), so interest_rate can't be derived and defaults to 0.0. Silently
-    # defaulting would misrepresent this as "no interest expense"; tracking it here keeps
-    # it visible through to reporting, the same Assumed-vs-Demonstrated split as elsewhere.
+    assumptions: tuple[str, ...] = ()        # last-resort defaults: no data, no override
+    overrides_applied: tuple[str, ...] = ()  # analyst-sourced, cited values used in place
+    # of auto-derivation -- for a driver that genuinely can't be pulled from tagged filing
+    # data (Nike's interest_expense isn't a standard us-gaap element anywhere in its
+    # primary statements -- confirmed by direct diagnostic, not assumed), the honest move
+    # is a cited, researched number, not a silent 0.0. This is the general mechanism for
+    # any company's undiscoverable driver, not a Nike-specific patch: three-way split --
+    # Demonstrated (silent, auto-derived) / Sourced-override (cited here) / Assumed
+    # (in `assumptions`, genuinely nothing to go on) -- same fact discipline as elsewhere
+    # in this project, just applied to forecast inputs instead of attribution.
 
 
-def derive_drivers_from_history(table: AnnualTable, base_year: int) -> Drivers:
-    """Every driver is a ratio pulled from the most recent actual year -- 'status quo'
-    continuation, not an invented number. Nothing here is hardcoded; change the base
-    year and every driver recomputes from a different actual."""
-    y = table[base_year]
-    py = table.get(base_year - 1)
-    revenue = y["revenue"]
-    cogs = revenue - y["gross_profit"] if "gross_profit" in y else y.get("cost_of_revenue")
-    growth = (revenue / py["revenue"] - 1.0) if py and "revenue" in py else 0.0
+def _cogs_for_year(y: dict[str, float]) -> float | None:
+    if "gross_profit" in y and "revenue" in y:
+        return y["revenue"] - y["gross_profit"]
+    return y.get("cost_of_revenue")
+
+
+def derive_drivers_from_history(
+    table: AnnualTable,
+    base_year: int,
+    lookback_years: int = 3,
+    overrides: dict[str, tuple[float, str]] | None = None,
+) -> Drivers:
+    """Ratio-based drivers are averaged over the trailing `lookback_years` (default 3)
+    ending at base_year -- not read off a single year. A single-year snapshot is fragile
+    to whatever happened to be true that specific year. Confirmed against real Nike data:
+    FY2026 alone gave inventory_days=103 (elevated -- Nike's 2023-24 inventory glut was
+    still working through) and a dividend_payout_ratio of 77% (roughly double Nike's
+    historical norm, because FY2026 net income was itself depressed while the dividend
+    kept growing on its own trajectory). A trailing average is still 100% derived from
+    reported actuals -- never invented -- just averaged over more of them, which is
+    standard practice for exactly this reason.
+
+    revenue_growth is a CAGR across the lookback window, not one year-over-year delta,
+    for the same reason: FY2026 vs FY2025 alone gave 0.19% growth, which mostly says
+    'the post-downturn trough stopped shrinking', not 'here is the trend'.
+
+    `overrides`: {driver_name: (value, source_citation)}. For a driver that can't be
+    derived from tagged data in any lookback year at all, supply a cited value instead of
+    silently defaulting -- an analyst manually researching and citing one input when the
+    structured pull genuinely can't reach it is normal practice, general to any company,
+    not specific to this one. Recorded in Drivers.overrides_applied, never silent.
+    """
+    overrides = overrides or {}
+    years = sorted(y for y in range(base_year - lookback_years + 1, base_year + 1) if y in table)
+    if not years:
+        raise ValueError(f"No historical data at or before FY{base_year}")
 
     assumptions: list[str] = []
-    if "interest_expense" in y:
-        interest_rate = y["interest_expense"] / max(y.get("long_term_debt", 1.0), 1e-9)
+    overrides_applied: list[str] = []
+    if len(years) < lookback_years:
+        assumptions.append(
+            f"Requested {lookback_years}-yr lookback, only {len(years)} year(s) available "
+            f"{years} -- averaged over what exists, not padded or extrapolated."
+        )
+
+    def yearly(field_fn):
+        out = []
+        for yr in years:
+            v = field_fn(table[yr])
+            if v is not None:
+                out.append(v)
+        return out
+
+    def avg(vals):
+        return sum(vals) / len(vals) if vals else None
+
+    def ratio(y, num_key, denom_key=None, use_cogs=False):
+        if num_key not in y:
+            return None
+        denom = _cogs_for_year(y) if use_cogs else y.get(denom_key)
+        return y[num_key] / denom if denom else None
+
+    gross_margins = yearly(lambda y: ratio(y, "gross_profit", "revenue"))
+    sga_pcts = yearly(lambda y: ratio(y, "sga_expense", "revenue"))
+    tax_rates = yearly(lambda y: y["income_tax_expense"] / (y["net_income"] + y["income_tax_expense"])
+                        if "income_tax_expense" in y and "net_income" in y
+                        and (y["net_income"] + y["income_tax_expense"]) else None)
+    ar_days_list = yearly(lambda y: ratio(y, "accounts_receivable", "revenue"))
+    ar_days_list = [v * 365 for v in ar_days_list]
+    inv_days_list = [v * 365 for v in yearly(lambda y: ratio(y, "inventory", use_cogs=True))]
+    ap_days_list = [v * 365 for v in yearly(lambda y: ratio(y, "accounts_payable", use_cogs=True))]
+    capex_pcts = yearly(lambda y: ratio(y, "capex", "revenue"))
+    da_pcts = yearly(lambda y: ratio(y, "depreciation_amortization", "revenue"))
+    payout_ratios = yearly(lambda y: y.get("dividends_paid", 0.0) / y["net_income"]
+                            if y.get("net_income") else None)
+
+    first_year, last_year = years[0], years[-1]
+    if len(years) >= 2 and "revenue" in table[first_year] and "revenue" in table[last_year] \
+            and table[first_year]["revenue"] > 0:
+        periods = len(years) - 1
+        revenue_growth = (table[last_year]["revenue"] / table[first_year]["revenue"]) ** (1 / periods) - 1
     else:
-        interest_rate = 0.0
-        assumptions.append("interest_expense not tagged for this filer -- interest_rate assumed 0.0")
+        revenue_growth = 0.0
+        assumptions.append("Fewer than 2 years available -- cannot compute a CAGR; "
+                            "revenue_growth assumed 0.0")
+
+    if "interest_rate" in overrides:
+        interest_rate, source = overrides["interest_rate"]
+        overrides_applied.append(f"interest_rate = {interest_rate:.4f} -- {source}")
+    else:
+        rates = yearly(lambda y: y["interest_expense"] / y["long_term_debt"]
+                        if "interest_expense" in y and y.get("long_term_debt") else None)
+        if rates:
+            interest_rate = avg(rates)
+        else:
+            interest_rate = 0.0
+            assumptions.append(
+                "interest_expense not tagged for this filer in any lookback year, and no "
+                "override supplied -- interest_rate assumed 0.0 (understates leverage cost)"
+            )
+
+    debt_repayment, debt_repayment_source = overrides.get("debt_repayment", (0.0, None))
+    if debt_repayment_source:
+        overrides_applied.append(f"debt_repayment = {debt_repayment:,.0f} -- {debt_repayment_source}")
 
     return Drivers(
-        revenue_growth=growth,
-        gross_margin=y["gross_profit"] / revenue,
-        sga_pct_revenue=y["sga_expense"] / revenue,
-        tax_rate=y["income_tax_expense"] / max(y["net_income"] + y["income_tax_expense"], 1e-9),
-        ar_days=y["accounts_receivable"] / revenue * 365,
-        inventory_days=y["inventory"] / cogs * 365,
-        ap_days=y["accounts_payable"] / cogs * 365,
-        capex_pct_revenue=y["capex"] / revenue,
-        da_pct_revenue=y["depreciation_amortization"] / revenue,
+        revenue_growth=revenue_growth,
+        gross_margin=avg(gross_margins) or 0.0,
+        sga_pct_revenue=avg(sga_pcts) or 0.0,
+        tax_rate=avg(tax_rates) or 0.0,
+        ar_days=avg(ar_days_list) or 0.0,
+        inventory_days=avg(inv_days_list) or 0.0,
+        ap_days=avg(ap_days_list) or 0.0,
+        capex_pct_revenue=avg(capex_pcts) or 0.0,
+        da_pct_revenue=avg(da_pcts) or 0.0,
         interest_rate=interest_rate,
-        debt_repayment=0.0,
-        dividend_payout_ratio=(y.get("dividends_paid", 0.0) / y["net_income"]
-                                if y["net_income"] else 0.0),
+        debt_repayment=debt_repayment,
+        dividend_payout_ratio=avg(payout_ratios) or 0.0,
         assumptions=tuple(assumptions),
+        overrides_applied=tuple(overrides_applied),
     )
 
 

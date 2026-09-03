@@ -76,14 +76,26 @@ def main():
             status = "PASS" if c.passed else "FLAG"
             print(f"[{c.kind.upper()}] {status} {c.name}: {c.detail}")
 
-    drivers = derive_drivers_from_history(table, base_year)
-    print(f"\n--- Drivers derived from FY{base_year} ---")
+    source_note = ("Nike FY2020 10-K debt schedule (sec.gov/Archives/edgar/data/320187/"
+                   "000032018720000047/R37.htm): weighted-average coupon across bond "
+                   "tranches maturing after Sept 2026 (excludes the 2.25% 2023 and 2.40% "
+                   "2025 tranches, both since matured). Does not capture any refinancing "
+                   "or new issuance since FY2020 -- not verified against a more recent "
+                   "debt footnote.")
+    drivers = derive_drivers_from_history(
+        table, base_year, overrides={"interest_rate": (0.0314, source_note)},
+    )
+    print(f"\n--- Drivers derived from FY{base_year - 2}-FY{base_year} (3-yr trailing average) ---")
     for field, value in drivers.__dict__.items():
-        if field == "assumptions":
+        if field in ("assumptions", "overrides_applied"):
             continue
         print(f"  {field}: {value:.4f}" if isinstance(value, float) else f"  {field}: {value}")
+    if drivers.overrides_applied:
+        print("  Sourced overrides applied (cited, not auto-derived):")
+        for o in drivers.overrides_applied:
+            print(f"    - {o}")
     if drivers.assumptions:
-        print("  Assumptions used (not derived from a reported figure):")
+        print("  Assumptions used (no data, no override -- genuine last resort):")
         for a in drivers.assumptions:
             print(f"    - {a}")
 

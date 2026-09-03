@@ -37,20 +37,77 @@ def test_derive_drivers_matches_hand_calculation():
     assert abs(d.interest_rate - 0.05) < 1e-9
     assert abs(d.dividend_payout_ratio - 40 / 168) < 1e-9
     assert d.debt_repayment == 0.0  # no schedule info -- flat debt is the honest default
-    assert d.assumptions == ()  # interest_expense was present -- nothing to flag
+    assert d.overrides_applied == ()
+    # Only 2 years exist (2022 has revenue only) against the default 3-yr lookback --
+    # that shortfall itself must be flagged, not silently absorbed.
+    assert len(d.assumptions) == 1
+    assert "2 year" in d.assumptions[0]
 
 
 def test_derive_drivers_flags_assumption_when_interest_expense_untagged():
-    """Mirrors the real gap found against live Nike data: interest expense is disclosed
-    only in a supplementary fixed-charges exhibit, not tagged as a standard element in
-    the primary statements. interest_rate must default to 0.0 rather than crash on a
-    KeyError -- and that default must be visible, not silent."""
+    """Mirrors the real gap found against live Nike data: interest expense is not a
+    standard tagged element in Nike's primary statements at all (confirmed via direct
+    diagnostic against SEC, not assumed). interest_rate must default to 0.0 rather than
+    crash on a KeyError -- and that default must be visible, not silent."""
     year_without_interest = {k: v for k, v in YEAR_2023.items() if k != "interest_expense"}
     table = {2022: YEAR_2022, 2023: year_without_interest}
     d = derive_drivers_from_history(table, base_year=2023)
     assert d.interest_rate == 0.0
+    assert any("interest_expense" in a for a in d.assumptions)
+
+
+def test_derive_drivers_averages_ratios_across_the_lookback_window_not_just_base_year():
+    """Built so every year contributes a different, clean value -- proves the averaging
+    is real, not an accident of only one year having data. Mirrors the two real Nike
+    distortions directly: inventory_days pinned to one anomalous year (2023-24 glut) and
+    dividend_payout_ratio pinned to one depressed-earnings year both get smoothed by
+    using 3 years instead of 1."""
+    years = {
+        2030: {"revenue": 1000.0, "gross_profit": 300.0, "net_income": 300.0,
+               "income_tax_expense": 75.0, "dividends_paid": 60.0,   # payout 0.20
+               "accounts_receivable": 1000 * 30 / 365, "accounts_payable": 700 * 40 / 365,
+               "inventory": 700 * 100 / 365,                          # inv_days 100
+               "capex": 50.0, "depreciation_amortization": 40.0, "sga_expense": 200.0},
+        2031: {"revenue": 1100.0, "gross_profit": 440.0, "net_income": 400.0,
+               "income_tax_expense": 100.0, "dividends_paid": 160.0,  # payout 0.40
+               "accounts_receivable": 1100 * 30 / 365, "accounts_payable": 660 * 40 / 365,
+               "inventory": 660 * 150 / 365,                          # inv_days 150
+               "capex": 55.0, "depreciation_amortization": 44.0, "sga_expense": 220.0},
+        2032: {"revenue": 1210.0, "gross_profit": 605.0, "net_income": 500.0,
+               "income_tax_expense": 125.0, "dividends_paid": 300.0,  # payout 0.60
+               "accounts_receivable": 1210 * 30 / 365, "accounts_payable": 605 * 40 / 365,
+               "inventory": 605 * 200 / 365,                          # inv_days 200
+               "capex": 60.5, "depreciation_amortization": 48.4, "sga_expense": 242.0},
+    }
+    d = derive_drivers_from_history(years, base_year=2032, lookback_years=3)
+
+    assert abs(d.gross_margin - 0.40) < 1e-9        # (0.30 + 0.40 + 0.50) / 3
+    assert abs(d.inventory_days - 150.0) < 1e-6      # (100 + 150 + 200) / 3, not 200
+    assert abs(d.dividend_payout_ratio - 0.40) < 1e-9  # (0.20 + 0.40 + 0.60) / 3, not 0.60
+    assert abs(d.revenue_growth - 0.10) < 1e-9        # CAGR: (1210/1000)^(1/2) - 1 = 0.10 exactly
+    # Full 3-year window was available for every ratio actually present in the fixture --
+    # the one flagged assumption is interest_rate, because this fixture has no debt data
+    # at all (not what this test is checking), not a lookback-window shortfall.
     assert len(d.assumptions) == 1
     assert "interest_expense" in d.assumptions[0]
+
+
+def test_derive_drivers_applies_a_sourced_override_and_records_it_distinctly_from_assumptions():
+    """The general mechanism behind Nike's interest_rate fix: a cited, researched value
+    used in place of auto-derivation, tracked separately from a silent last-resort
+    default so a reader can tell 'someone checked this' from 'nothing was available'."""
+    year_without_interest = {k: v for k, v in YEAR_2023.items() if k != "interest_expense"}
+    table = {2022: YEAR_2022, 2023: year_without_interest}
+    d = derive_drivers_from_history(
+        table, base_year=2023,
+        overrides={"interest_rate": (0.0314, ("Nike FY2020 10-K debt schedule (R37.htm), "
+                                               "weighted avg coupon on tranches outstanding "
+                                               "past Sept 2026"))},
+    )
+    assert abs(d.interest_rate - 0.0314) < 1e-9
+    assert len(d.overrides_applied) == 1
+    assert "0.0314" in d.overrides_applied[0]
+    assert not any("interest_expense" in a for a in d.assumptions)  # overridden, not assumed
 
 
 def test_project_year_balances_by_construction():
