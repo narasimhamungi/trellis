@@ -24,15 +24,38 @@ import time
 from dataclasses import dataclass
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from .schema import SCHEMA, LineItem
 
 BASE_URL = "https://data.sec.gov/api/xbrl/companyconcept/CIK{cik:010d}/us-gaap/{tag}.json"
 REQUEST_DELAY_SECONDS = 0.15  # SEC asks for <=10 req/sec; stay well under
+REQUEST_TIMEOUT_SECONDS = 30  # generous -- SEC can be slow under load, and merging
+# across a full tag fallback chain (see fetch_line_item) means more requests per line
+# item than a single-tag pull, so transient slowness is more likely to be hit, not less
 
 
 class IngestionError(Exception):
     pass
+
+
+def make_session() -> requests.Session:
+    """A plain requests.Session() has no retry behavior -- a single dropped connection
+    or slow handshake fails the whole pull. Retrying idempotent GETs with backoff is
+    standard practice for any client hitting a real external API repeatedly, and becomes
+    more necessary, not less, once this scales from one company to many."""
+    session = requests.Session()
+    retry = Retry(
+        total=3, connect=3, read=3,
+        backoff_factor=1.0,  # 1s, 2s, 4s between attempts
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
 
 @dataclass(frozen=True)
@@ -63,8 +86,8 @@ def fetch_concept_raw(cik: int, tag: str, session: requests.Session | None = Non
     """Fetch one us-gaap concept for one filer. Returns None if the filer never used this tag
     (a 404 from SEC -- not an error, just means try the next tag in the fallback chain)."""
     url = BASE_URL.format(cik=cik, tag=tag)
-    sess = session or requests.Session()
-    resp = sess.get(url, headers=_headers(), timeout=15)
+    sess = session or make_session()
+    resp = sess.get(url, headers=_headers(), timeout=REQUEST_TIMEOUT_SECONDS)
     time.sleep(REQUEST_DELAY_SECONDS)
     if resp.status_code == 404:
         return None
@@ -111,7 +134,7 @@ def fetch_line_item(cik: int, item: LineItem,
     period (the merged dedup below does, by filed date); it's now just a list of known
     aliases to check, and matched_tag on each Observation preserves which one actually
     supplied it."""
-    sess = session or requests.Session()
+    sess = session or make_session()
     all_rows: list[dict] = []
     for tag in item.xbrl_tags:
         payload = fetch_concept_raw(cik, tag, sess)
@@ -143,7 +166,7 @@ def fetch_line_item(cik: int, item: LineItem,
 
 
 def fetch_all(cik: int, forms: tuple[str, ...] = ("10-K",)) -> dict[str, list[Observation]]:
-    session = requests.Session()
+    session = make_session()
     results: dict[str, list[Observation]] = {}
     missing: list[str] = []
     for item in SCHEMA:
