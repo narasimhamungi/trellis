@@ -40,6 +40,12 @@ class Drivers:
     interest_rate: float          # applied to beginning-of-year LT debt balance
     debt_repayment: float         # dollars/year; 0.0 = flat debt
     dividend_payout_ratio: float  # 0.0 = no dividends
+    assumptions: tuple[str, ...] = ()  # non-empty when a driver had to fall back rather
+    # than derive from a reported figure -- e.g. Nike doesn't tag interest_expense as a
+    # standard us-gaap element in its primary statements (only in a supplementary fixed-
+    # charges exhibit), so interest_rate can't be derived and defaults to 0.0. Silently
+    # defaulting would misrepresent this as "no interest expense"; tracking it here keeps
+    # it visible through to reporting, the same Assumed-vs-Demonstrated split as elsewhere.
 
 
 def derive_drivers_from_history(table: AnnualTable, base_year: int) -> Drivers:
@@ -51,6 +57,14 @@ def derive_drivers_from_history(table: AnnualTable, base_year: int) -> Drivers:
     revenue = y["revenue"]
     cogs = revenue - y["gross_profit"] if "gross_profit" in y else y.get("cost_of_revenue")
     growth = (revenue / py["revenue"] - 1.0) if py and "revenue" in py else 0.0
+
+    assumptions: list[str] = []
+    if "interest_expense" in y:
+        interest_rate = y["interest_expense"] / max(y.get("long_term_debt", 1.0), 1e-9)
+    else:
+        interest_rate = 0.0
+        assumptions.append("interest_expense not tagged for this filer -- interest_rate assumed 0.0")
+
     return Drivers(
         revenue_growth=growth,
         gross_margin=y["gross_profit"] / revenue,
@@ -61,10 +75,11 @@ def derive_drivers_from_history(table: AnnualTable, base_year: int) -> Drivers:
         ap_days=y["accounts_payable"] / cogs * 365,
         capex_pct_revenue=y["capex"] / revenue,
         da_pct_revenue=y["depreciation_amortization"] / revenue,
-        interest_rate=y["interest_expense"] / max(y.get("long_term_debt", 1.0), 1e-9),
+        interest_rate=interest_rate,
         debt_repayment=0.0,
         dividend_payout_ratio=(y.get("dividends_paid", 0.0) / y["net_income"]
                                 if y["net_income"] else 0.0),
+        assumptions=tuple(assumptions),
     )
 
 

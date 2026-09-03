@@ -77,7 +77,8 @@ def fill_derived_gaps(table: AnnualTable) -> list[DerivedField]:
     Demonstrated-vs-Inferred distinction Bridgework's claim register uses. Mutates table
     in place; returns what was filled so it can be surfaced in reporting, not hidden."""
     filled: list[DerivedField] = []
-    for year, data in table.items():
+    for year in sorted(table):
+        data = table[year]
         if "total_liabilities" not in data and "total_assets" in data and "stockholders_equity" in data:
             data["total_liabilities"] = data["total_assets"] - data["stockholders_equity"]
             filled.append(DerivedField(year, "total_liabilities", "total_assets - stockholders_equity"))

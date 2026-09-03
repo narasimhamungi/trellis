@@ -37,6 +37,20 @@ def test_derive_drivers_matches_hand_calculation():
     assert abs(d.interest_rate - 0.05) < 1e-9
     assert abs(d.dividend_payout_ratio - 40 / 168) < 1e-9
     assert d.debt_repayment == 0.0  # no schedule info -- flat debt is the honest default
+    assert d.assumptions == ()  # interest_expense was present -- nothing to flag
+
+
+def test_derive_drivers_flags_assumption_when_interest_expense_untagged():
+    """Mirrors the real gap found against live Nike data: interest expense is disclosed
+    only in a supplementary fixed-charges exhibit, not tagged as a standard element in
+    the primary statements. interest_rate must default to 0.0 rather than crash on a
+    KeyError -- and that default must be visible, not silent."""
+    year_without_interest = {k: v for k, v in YEAR_2023.items() if k != "interest_expense"}
+    table = {2022: YEAR_2022, 2023: year_without_interest}
+    d = derive_drivers_from_history(table, base_year=2023)
+    assert d.interest_rate == 0.0
+    assert len(d.assumptions) == 1
+    assert "interest_expense" in d.assumptions[0]
 
 
 def test_project_year_balances_by_construction():
