@@ -35,10 +35,20 @@ class CheckResult:
 
 
 def build_annual_table(observations: dict[str, list[Observation]]) -> AnnualTable:
-    """FY-period observations only, keyed by fiscal_year -> canonical_name -> value.
-    Multiple filings can report the same fiscal year (e.g. a 10-K and next year's 10-K
-    comparative) -- ingest.py's dedup already resolved that to one observation per
-    (period_end, unit), so the last one standing here is authoritative."""
+    """FY-period observations only, keyed by the calendar year of period_end -- NOT by
+    the SEC-reported fiscal_year field.
+
+    This is not a style choice. A 10-K's income statement shows three years of
+    comparatives, so an older period gets re-published (unchanged) in each subsequent
+    year's filing. SEC's own 'fy' field on that fact reflects which filing reported it,
+    not the period it describes -- so the *most recently filed* instance of an older
+    period (which _dedupe_restatements correctly prefers, since that's the right rule
+    for genuine restatements) can carry a 'fy' label that's 1-2 years later than the
+    period it actually is. Confirmed against live Nike data: FY2017 revenue ($34.35B,
+    period_end 2017-05-31) came back labeled fiscal_year=2019 -- correct value, correct
+    period, wrong label, because the FY2019 10-K happened to be the last filing to
+    include FY2017 as a trailing comparative. Keying off period_end sidesteps the
+    ambiguity entirely; deriving the calendar year from an ISO date is not."""
     table: AnnualTable = {}
     for canonical_name, obs_list in observations.items():
         if canonical_name == "_missing":
@@ -46,7 +56,8 @@ def build_annual_table(observations: dict[str, list[Observation]]) -> AnnualTabl
         for obs in obs_list:
             if obs.fiscal_period != "FY":
                 continue
-            table.setdefault(obs.fiscal_year, {})[canonical_name] = obs.value
+            year = int(obs.period_end[:4])
+            table.setdefault(year, {})[canonical_name] = obs.value
     return table
 
 

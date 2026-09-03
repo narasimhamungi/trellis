@@ -29,6 +29,26 @@ def test_build_annual_table_filters_to_fy_and_keys_by_year():
     assert table[2023]["total_assets"] == 500
 
 
+def test_build_annual_table_keys_by_period_end_not_by_secs_fy_field():
+    """Regression test for a real bug found against live Nike data: SEC's fy field on an
+    observation reflects which filing reported it, not the period it describes, because
+    older comparative-column periods get re-published in later filings. dedup correctly
+    keeps the most-recently-filed VALUE for a period, but that filing's own 'fy' label can
+    be 1-2 years later than the period actually is. Constructed from the real pattern
+    (Nike FY2017 revenue, $34.35B, came back with fiscal_year=2019 attached to
+    period_end='2017-05-31') -- not a hypothetical edge case."""
+    mislabeled = Observation(
+        canonical_name="revenue", matched_tag="RevenueFromContractWithCustomerExcludingAssessedTax",
+        fiscal_year=2019,  # WRONG -- this is the filing year, not the period's year
+        fiscal_period="FY", period_end="2017-05-31", form="10-K", filed="2019-07-23",
+        accession_number="0000320187-19-000051", value=34_350_000_000, unit="USD",
+    )
+    table = build_annual_table({"revenue": [mislabeled]})
+    assert 2017 in table  # keyed by the period it actually describes...
+    assert 2019 not in table  # ...not by the filing's own mislabeled fy field
+    assert table[2017]["revenue"] == 34_350_000_000
+
+
 # --- balance_sheet_balances (hard invariant) --------------------------------
 
 CLEAN_YEAR = {
