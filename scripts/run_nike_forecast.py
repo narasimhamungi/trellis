@@ -1,0 +1,105 @@
+"""
+Runnable example: pull Nike's real SEC filings, build the historical table, and
+produce a 5-year forecast. This is the same call sequence any user of this library
+would make -- meant to be read, not just run.
+
+Requires TRELLIS_USER_AGENT (see docs/NETWORK.md) and network access to data.sec.gov.
+
+    python scripts/run_nike_forecast.py
+"""
+
+import sys
+
+sys.path.insert(0, "src")  # run without PYTHONPATH set, for convenience
+
+from trellis.forecast import (
+    derive_drivers_from_history,
+    reconcile_forecast_year,
+    run_forecast,
+)
+from trellis.ingest import fetch_all
+from trellis.statements import (
+    build_annual_table,
+    fill_derived_gaps,
+    run_all_checks,
+)
+
+NIKE_CIK = 320187
+
+
+def pick_base_year(table):
+    """Most recent year that has everything the forecast actually needs. Checked
+    explicitly rather than assumed, because tag availability can legitimately differ
+    by year (a filer adopting a new tag, a line item that stops being material)."""
+    required = ["revenue", "sga_expense", "income_tax_expense", "net_income",
+                "accounts_receivable", "inventory", "accounts_payable", "capex",
+                "depreciation_amortization", "ppe_net", "retained_earnings", "total_assets",
+                "cash_and_equivalents", "total_liabilities", "stockholders_equity"]
+    for year in sorted(table, reverse=True):
+        data = table[year]
+        missing = [f for f in required if f not in data]
+        if "gross_profit" not in data and "cost_of_revenue" not in data:
+            missing.append("gross_profit/cost_of_revenue")
+        if not missing:
+            return year, []
+        if year == max(table):  # only report the newest year's gap; older ones are expected thinner
+            newest_gap = missing
+    return None, newest_gap
+
+
+def main():
+    print(f"Fetching Nike (CIK {NIKE_CIK}) from SEC EDGAR...")
+    raw = fetch_all(NIKE_CIK)
+    if raw.get("_missing"):
+        print(f"Tags never resolved for this filer (checked at ingest, not fatal): {raw['_missing']}")
+
+    table = build_annual_table(raw)
+    derived = fill_derived_gaps(table)
+    print(f"Derived (not reported) fields filled: {len(derived)} instances across {len(table)} years")
+
+    base_year, gap = pick_base_year(table)
+    if base_year is None:
+        print(f"No year has everything the forecast needs. Newest year is missing: {gap}")
+        return
+    print(f"\nBase year for the forecast: FY{base_year}")
+
+    recent_years = sorted(table)[-3:]
+    print("\n--- Historical structural checks, most recent 3 years ---")
+    for c in run_all_checks(table):
+        if any(f"FY{y}:" in c.detail for y in recent_years):
+            status = "PASS" if c.passed else "FLAG"
+            print(f"[{c.kind.upper()}] {status} {c.name}: {c.detail}")
+
+    drivers = derive_drivers_from_history(table, base_year)
+    print(f"\n--- Drivers derived from FY{base_year} ---")
+    for field, value in drivers.__dict__.items():
+        if field == "assumptions":
+            continue
+        print(f"  {field}: {value:.4f}" if isinstance(value, float) else f"  {field}: {value}")
+    if drivers.assumptions:
+        print("  Assumptions used (not derived from a reported figure):")
+        for a in drivers.assumptions:
+            print(f"    - {a}")
+
+    forecast = run_forecast(table, base_year, drivers, years=5)
+
+    print(f"\n--- 5-year forecast (FY{base_year + 1}-FY{base_year + 5}), $ millions ---")
+    print(f"{'Year':<8}{'Revenue':>12}{'NetIncome':>12}{'Cash':>12}{'TotalAssets':>14}")
+    prior_cash = table[base_year]["cash_and_equivalents"]
+    any_failed = False
+    for year in sorted(forecast):
+        y = forecast[year]
+        print(f"FY{year:<6}{y['revenue'] / 1e6:>12,.0f}{y['net_income'] / 1e6:>12,.0f}"
+              f"{y['cash_and_equivalents'] / 1e6:>12,.0f}{y['total_assets'] / 1e6:>14,.0f}")
+        check = reconcile_forecast_year(year, y, prior_cash)
+        if not check.passed:
+            any_failed = True
+            print(f"  !! self-consistency check FAILED: {check.detail}")
+        prior_cash = y["cash_and_equivalents"]
+
+    print("\n" + ("Every forecast year reconciled cleanly." if not any_failed
+                   else "At least one year failed to reconcile -- see !! lines above."))
+
+
+if __name__ == "__main__":
+    main()
