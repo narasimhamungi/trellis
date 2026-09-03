@@ -59,6 +59,8 @@ SCHEMA: tuple[LineItem, ...] = (
              ("LongTermDebtNoncurrent", "LongTermDebt"), instant=True),
     LineItem("total_liabilities", Statement.BALANCE, ("Liabilities",), instant=True),
     LineItem("stockholders_equity", Statement.BALANCE, ("StockholdersEquity",), instant=True),
+    LineItem("retained_earnings", Statement.BALANCE,
+             ("RetainedEarningsAccumulatedDeficit",), instant=True),
 
     # --- Cash flow (period) ---
     LineItem("cfo", Statement.CASHFLOW,
@@ -72,6 +74,8 @@ SCHEMA: tuple[LineItem, ...] = (
     LineItem("depreciation_amortization", Statement.CASHFLOW,
              ("DepreciationDepletionAndAmortization", "DepreciationAmortizationAndAccretionNet"),
              instant=False),
+    LineItem("dividends_paid", Statement.CASHFLOW,
+             ("PaymentsOfDividendsCommonStock", "PaymentsOfDividends"), instant=False),
 )
 
 BY_NAME = {item.canonical_name: item for item in SCHEMA}

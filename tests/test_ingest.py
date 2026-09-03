@@ -10,8 +10,8 @@ import os
 
 os.environ["TRELLIS_USER_AGENT"] = "Trellis-Tests/0.1 test@example.com"
 
-from trellis.ingest import fetch_line_item, _dedupe_restatements  # noqa: E402
-from trellis.schema import BY_NAME  # noqa: E402
+from trellis.ingest import _dedupe_restatements, fetch_line_item
+from trellis.schema import BY_NAME
 
 
 class _FakeResponse:
