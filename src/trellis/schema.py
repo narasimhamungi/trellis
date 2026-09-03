@@ -29,7 +29,9 @@ class Statement(Enum):
 class LineItem:
     canonical_name: str
     statement: Statement
-    xbrl_tags: tuple[str, ...]  # tried in order; first with data wins
+    xbrl_tags: tuple[str, ...]  # known aliases for this concept -- ALL are queried and
+    # merged (see ingest.fetch_line_item); order has no effect on which value wins for
+    # a given period, only on API call sequence
     instant: bool  # True = point-in-time (balance sheet), False = period (flow)
 
 

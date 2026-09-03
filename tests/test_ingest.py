@@ -69,7 +69,7 @@ def test_dedupe_keeps_most_recently_filed_value_per_period():
     assert deduped["2024-05-31"]["accn"] == "0000320187-24-000099"
 
 
-def test_fetch_line_item_tries_tags_in_order_and_records_which_matched():
+def test_fetch_line_item_uses_the_only_tag_that_has_data():
     item = BY_NAME["revenue"]
     assert item.xbrl_tags[0] == "RevenueFromContractWithCustomerExcludingAssessedTax"
     url_first_tag = (
@@ -82,10 +82,10 @@ def test_fetch_line_item_tries_tags_in_order_and_records_which_matched():
     assert len(obs) == 2  # FY23 and FY24, deduped
     assert all(o.matched_tag == "RevenueFromContractWithCustomerExcludingAssessedTax" for o in obs)
     assert obs[-1].value == 51360000000
-    assert len(session.calls) == 1  # first tag hit -- fallback tags never queried
+    assert len(session.calls) == len(item.xbrl_tags)  # every tag queried, not just the first
 
 
-def test_fetch_line_item_falls_back_when_first_tag_is_absent():
+def test_fetch_line_item_uses_data_from_a_later_tag_when_earlier_ones_are_absent():
     item = BY_NAME["revenue"]
     url_first_tag = (
         "https://data.sec.gov/api/xbrl/companyconcept/CIK0000320187/"
@@ -102,7 +102,45 @@ def test_fetch_line_item_falls_back_when_first_tag_is_absent():
 
     assert len(obs) == 2
     assert all(o.matched_tag == "Revenues" for o in obs)
-    assert len(session.calls) == 2  # had to try both tags
+    assert len(session.calls) == len(item.xbrl_tags)  # every tag queried regardless
+
+
+def test_fetch_line_item_merges_across_tags_when_filer_switched_mid_history():
+    """Regression test for a real bug found against live Nike data: the old
+    'first tag with any data wins' rule permanently truncated inventory to FY2009-2011,
+    because InventoryNet had exactly those three years and nothing else -- the second
+    fallback tag (which actually covers the years since) was never even queried. Filers
+    switching XBRL elements for the same line partway through their history turned out
+    to be routine, not an edge case (same pattern hit both inventory and D&A)."""
+    item = BY_NAME["inventory"]
+    assert item.xbrl_tags == ("InventoryNet", "InventoryFinishedGoodsNetOfReserves")
+
+    old_tag_fixture = {"units": {"USD": [
+        {"end": "2009-05-31", "val": 2_357_000_000, "accn": "old-09", "fy": 2009,
+         "fp": "FY", "form": "10-K", "filed": "2009-07-20"},
+        {"end": "2010-05-31", "val": 2_041_000_000, "accn": "old-10", "fy": 2010,
+         "fp": "FY", "form": "10-K", "filed": "2010-07-20"},
+    ]}}
+    new_tag_fixture = {"units": {"USD": [
+        {"end": "2024-05-31", "val": 7_519_000_000, "accn": "new-24", "fy": 2026,
+         "fp": "FY", "form": "10-K", "filed": "2026-07-15"},
+        {"end": "2025-05-31", "val": 7_489_000_000, "accn": "new-25", "fy": 2025,
+         "fp": "FY", "form": "10-K", "filed": "2025-07-17"},
+    ]}}
+    session = _FakeSession({
+        "https://data.sec.gov/api/xbrl/companyconcept/CIK0000320187/us-gaap/InventoryNet.json":
+            _FakeResponse(200, old_tag_fixture),
+        "https://data.sec.gov/api/xbrl/companyconcept/CIK0000320187/"
+        "us-gaap/InventoryFinishedGoodsNetOfReserves.json":
+            _FakeResponse(200, new_tag_fixture),
+    })
+    obs = fetch_line_item(320187, item, forms=("10-K",), session=session)
+
+    assert len(obs) == 4  # both eras present, not just whichever tag was tried first
+    by_year = {o.period_end: o for o in obs}
+    assert by_year["2009-05-31"].matched_tag == "InventoryNet"
+    assert by_year["2025-05-31"].matched_tag == "InventoryFinishedGoodsNetOfReserves"
+    assert by_year["2025-05-31"].value == 7_489_000_000
 
 
 def test_fetch_line_item_returns_empty_when_no_tag_matches():

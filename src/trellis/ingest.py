@@ -98,39 +98,48 @@ def _form_matches(form: str, forms: tuple[str, ...]) -> bool:
 def fetch_line_item(cik: int, item: LineItem,
                      forms: tuple[str, ...] = ("10-K",),
                      session: requests.Session | None = None) -> list[Observation]:
-    """Try each tag in the item's fallback chain; use the first that returns data.
-    No silent merging across tags -- matched_tag is recorded on every observation."""
+    """Query every tag in the fallback chain and merge the results -- do NOT stop at
+    the first tag with any data.
+
+    Real filers permanently switch which XBRL element they use for the same economic
+    line partway through their reporting history; this isn't an edge case. Confirmed
+    against live Nike data: InventoryNet has exactly 4 entries (FY2009-2011, when Nike
+    used it), InventoryFinishedGoodsNetOfReserves has 32 (the years since). A
+    'first tag with any data wins' rule would have permanently truncated the series to
+    three years the moment InventoryNet returned anything at all -- which is exactly
+    the bug this replaced. Tag order no longer decides which value wins for a given
+    period (the merged dedup below does, by filed date); it's now just a list of known
+    aliases to check, and matched_tag on each Observation preserves which one actually
+    supplied it."""
     sess = session or requests.Session()
+    all_rows: list[dict] = []
     for tag in item.xbrl_tags:
         payload = fetch_concept_raw(cik, tag, sess)
         if payload is None or "units" not in payload:
             continue
-        rows: list[dict] = []
         for unit, entries in payload["units"].items():
             for e in entries:
                 if not _form_matches(e.get("form", ""), forms):
                     continue
-                e = {**e, "_unit": unit}
-                rows.append(e)
-        if not rows:
-            continue
-        deduped = _dedupe_restatements(rows)
-        return [
-            Observation(
-                canonical_name=item.canonical_name,
-                matched_tag=tag,
-                fiscal_year=r["fy"],
-                fiscal_period=r["fp"],
-                period_end=r["end"],
-                form=r["form"],
-                filed=r["filed"],
-                accession_number=r["accn"],
-                value=r["val"],
-                unit=r["_unit"],
-            )
-            for r in sorted(deduped, key=lambda r: r["end"])
-        ]
-    return []  # every tag in the fallback chain came up empty -- caller decides if that's fatal
+                all_rows.append({**e, "_unit": unit, "_tag": tag})
+    if not all_rows:
+        return []
+    deduped = _dedupe_restatements(all_rows)
+    return [
+        Observation(
+            canonical_name=item.canonical_name,
+            matched_tag=r["_tag"],
+            fiscal_year=r["fy"],
+            fiscal_period=r["fp"],
+            period_end=r["end"],
+            form=r["form"],
+            filed=r["filed"],
+            accession_number=r["accn"],
+            value=r["val"],
+            unit=r["_unit"],
+        )
+        for r in sorted(deduped, key=lambda r: r["end"])
+    ]
 
 
 def fetch_all(cik: int, forms: tuple[str, ...] = ("10-K",)) -> dict[str, list[Observation]]:
