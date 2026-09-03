@@ -61,6 +61,32 @@ def build_annual_table(observations: dict[str, list[Observation]]) -> AnnualTabl
     return table
 
 
+@dataclass(frozen=True)
+class DerivedField:
+    year: int
+    canonical_name: str
+    method: str
+
+
+def fill_derived_gaps(table: AnnualTable) -> list[DerivedField]:
+    """Some line items are legitimately absent from a filer's own tagging -- not a pull
+    failure, just a different presentation format (Nike, for instance, has no separately
+    tagged operating-income subtotal; its income statement goes straight from expenses to
+    pretax income). Where the gap can be closed with an exact identity rather than a guess,
+    close it here -- but track that it was derived, not reported, the same
+    Demonstrated-vs-Inferred distinction Bridgework's claim register uses. Mutates table
+    in place; returns what was filled so it can be surfaced in reporting, not hidden."""
+    filled: list[DerivedField] = []
+    for year, data in table.items():
+        if "total_liabilities" not in data and "total_assets" in data and "stockholders_equity" in data:
+            data["total_liabilities"] = data["total_assets"] - data["stockholders_equity"]
+            filled.append(DerivedField(year, "total_liabilities", "total_assets - stockholders_equity"))
+        if "operating_income" not in data and "gross_profit" in data and "sga_expense" in data:
+            data["operating_income"] = data["gross_profit"] - data["sga_expense"]
+            filled.append(DerivedField(year, "operating_income", "gross_profit - sga_expense"))
+    return filled
+
+
 def check_balance_sheet_balances(year: int, year_data: dict[str, float],
                                   tolerance: float = 1.0) -> CheckResult:
     required = ("total_assets", "total_liabilities", "stockholders_equity")

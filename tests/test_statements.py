@@ -4,6 +4,7 @@ from trellis.statements import (
     check_balance_sheet_balances,
     check_cash_flow_ties_to_cash,
     check_retained_earnings_rollforward,
+    fill_derived_gaps,
     run_all_checks,
 )
 
@@ -47,6 +48,43 @@ def test_build_annual_table_keys_by_period_end_not_by_secs_fy_field():
     assert 2017 in table  # keyed by the period it actually describes...
     assert 2019 not in table  # ...not by the filing's own mislabeled fy field
     assert table[2017]["revenue"] == 34_350_000_000
+
+
+# --- fill_derived_gaps (Assets-Equity identity, not a guess) ----------------
+
+def test_fill_derived_gaps_computes_total_liabilities_from_identity_when_tag_absent():
+    """Mirrors the real gap found against live Nike data: 'Liabilities' wasn't tagged
+    directly. Assets - Equity is an exact identity, not an approximation, so this should
+    be filled rather than left blank -- but flagged as derived, not fetched."""
+    table = {2024: {"total_assets": 1_000.0, "stockholders_equity": 400.0}}  # no total_liabilities
+    derived = fill_derived_gaps(table)
+    assert table[2024]["total_liabilities"] == 600.0
+    assert len(derived) == 1
+    assert derived[0].canonical_name == "total_liabilities"
+    assert derived[0].method == "total_assets - stockholders_equity"
+
+
+def test_fill_derived_gaps_never_overwrites_a_directly_reported_value():
+    table = {2024: {"total_assets": 1_000.0, "stockholders_equity": 400.0, "total_liabilities": 555.0}}
+    derived = fill_derived_gaps(table)
+    assert table[2024]["total_liabilities"] == 555.0  # untouched -- reported value wins over derived
+    assert derived == []
+
+
+def test_fill_derived_gaps_derives_operating_income_when_tag_absent():
+    """Mirrors Nike's actual income-statement format, which has no separately tagged
+    operating-income subtotal at all -- not a pull failure, a different presentation."""
+    table = {2024: {"gross_profit": 440.0, "sga_expense": 220.0}}
+    derived = fill_derived_gaps(table)
+    assert table[2024]["operating_income"] == 220.0
+    assert [d.canonical_name for d in derived] == ["operating_income"]
+
+
+def test_fill_derived_gaps_leaves_true_gaps_alone_when_inputs_also_missing():
+    table = {2024: {"total_assets": 1_000.0}}  # no equity either -- can't derive liabilities
+    derived = fill_derived_gaps(table)
+    assert "total_liabilities" not in table[2024]
+    assert derived == []
 
 
 # --- balance_sheet_balances (hard invariant) --------------------------------

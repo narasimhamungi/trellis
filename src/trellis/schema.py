@@ -39,7 +39,7 @@ SCHEMA: tuple[LineItem, ...] = (
              ("SellingGeneralAndAdministrativeExpense",), instant=False),
     LineItem("operating_income", Statement.INCOME, ("OperatingIncomeLoss",), instant=False),
     LineItem("interest_expense", Statement.INCOME,
-             ("InterestExpense", "InterestExpenseDebt"), instant=False),
+             ("InterestExpense", "InterestExpenseDebt", "InterestIncomeExpenseNet"), instant=False),
     LineItem("income_tax_expense", Statement.INCOME, ("IncomeTaxExpenseBenefit",), instant=False),
     LineItem("net_income", Statement.INCOME, ("NetIncomeLoss",), instant=False),
 
