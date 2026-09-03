@@ -27,24 +27,24 @@ from trellis.statements import (
 NIKE_CIK = 320187
 
 
+REQUIRED = ["revenue", "sga_expense", "income_tax_expense", "net_income",
+            "accounts_receivable", "inventory", "accounts_payable", "capex",
+            "depreciation_amortization", "ppe_net", "retained_earnings", "total_assets",
+            "cash_and_equivalents", "total_liabilities", "stockholders_equity"]
+
+
+def missing_fields(data):
+    missing = [f for f in REQUIRED if f not in data]
+    if "gross_profit" not in data and "cost_of_revenue" not in data:
+        missing.append("gross_profit/cost_of_revenue")
+    return missing
+
+
 def pick_base_year(table):
-    """Most recent year that has everything the forecast actually needs. Checked
-    explicitly rather than assumed, because tag availability can legitimately differ
-    by year (a filer adopting a new tag, a line item that stops being material)."""
-    required = ["revenue", "sga_expense", "income_tax_expense", "net_income",
-                "accounts_receivable", "inventory", "accounts_payable", "capex",
-                "depreciation_amortization", "ppe_net", "retained_earnings", "total_assets",
-                "cash_and_equivalents", "total_liabilities", "stockholders_equity"]
     for year in sorted(table, reverse=True):
-        data = table[year]
-        missing = [f for f in required if f not in data]
-        if "gross_profit" not in data and "cost_of_revenue" not in data:
-            missing.append("gross_profit/cost_of_revenue")
-        if not missing:
-            return year, []
-        if year == max(table):  # only report the newest year's gap; older ones are expected thinner
-            newest_gap = missing
-    return None, newest_gap
+        if not missing_fields(table[year]):
+            return year
+    return None
 
 
 def main():
@@ -57,9 +57,15 @@ def main():
     derived = fill_derived_gaps(table)
     print(f"Derived (not reported) fields filled: {len(derived)} instances across {len(table)} years")
 
-    base_year, gap = pick_base_year(table)
+    print("\n--- Field availability, last 8 years (blank = present) ---")
+    recent = sorted(table)[-8:]
+    for year in recent:
+        gaps = missing_fields(table[year])
+        print(f"  FY{year}: {'complete' if not gaps else 'missing ' + str(gaps)}")
+
+    base_year = pick_base_year(table)
     if base_year is None:
-        print(f"No year has everything the forecast needs. Newest year is missing: {gap}")
+        print("\nNo year has everything the forecast needs -- see gaps above.")
         return
     print(f"\nBase year for the forecast: FY{base_year}")
 
