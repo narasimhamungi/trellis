@@ -85,6 +85,21 @@ def fill_derived_gaps(table: AnnualTable) -> list[DerivedField]:
         if "operating_income" not in data and "gross_profit" in data and "sga_expense" in data:
             data["operating_income"] = data["gross_profit"] - data["sga_expense"]
             filled.append(DerivedField(year, "operating_income", "gross_profit - sga_expense"))
+        if "sga_expense" not in data and "gross_profit" in data and "operating_income" in data:
+            # Not every filer tags a single consolidated SG&A line -- Amazon, for one,
+            # reports Cost of sales, Fulfillment, Technology and content, Marketing, and
+            # G&A as five separate categories with no combining tag at all. Rather than
+            # chase an unbounded list of category-specific tags (and still risk missing
+            # one), use the identity every income statement satisfies by definition:
+            # Gross Profit - Operating Income = all operating expenses, however many
+            # categories a filer splits them into. Exact, not an approximation, and it
+            # generalizes to any expense-line structure without company-specific tags.
+            # Guarded to run after the operating_income rule above so this can't derive
+            # from a value that was itself just derived from sga_expense in this same
+            # pass -- it only fires when operating_income was already present (reported
+            # or already resolved), never when both are simultaneously missing.
+            data["sga_expense"] = data["gross_profit"] - data["operating_income"]
+            filled.append(DerivedField(year, "sga_expense", "gross_profit - operating_income"))
     return filled
 
 

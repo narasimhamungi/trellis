@@ -57,7 +57,10 @@ REGISTRY: dict[int, CompanyProfile] = {
               "dividend_growth_rate across a window containing a special dividend year "
               "will likely be distorted by it; worth checking whether the growth_rate "
               "policy or payout_ratio policy handles this fixture's shape better before "
-              "trusting either uncritically. Not yet researched for override candidates.",
+              "trusting either uncritically. accounts_receivable is tagged "
+              "ReceivablesNetCurrent, not AccountsReceivableNetCurrent -- confirmed via "
+              "diagnostic, now in schema.py's fallback chain. Not yet researched for "
+              "override candidates.",
     ),
     1018724: CompanyProfile(
         cik=1018724, name="Amazon.com, Inc.", ticker="AMZN",
@@ -65,11 +68,17 @@ REGISTRY: dict[int, CompanyProfile] = {
         notes="Pays no dividend. Exercises the growth_rate-CAGR-undefined -> "
               "payout_ratio-fallback path, and payout_ratio itself should come back "
               "0.0 -- a real test that the pipeline handles 'no dividend' as a valid "
-              "state rather than a gap to fill. Thin historical net margins and heavy "
-              "capex relative to Nike/Costco -- a good stress test of whether the "
-              "driver set (designed against two consumer-goods retailers) still "
-              "produces sane output for a different business model, or needs its own "
-              "overrides. Not yet researched for override candidates.",
+              "state rather than a gap to fill. No consolidated SG&A tag exists at all "
+              "-- confirmed via diagnostic: income statement has five separate expense "
+              "categories (Cost of sales, Fulfillment, Technology and content, "
+              "Marketing, G&A) with no combining element, so sga_expense is now "
+              "derived as gross_profit - operating_income (statements.fill_derived_gaps) "
+              "rather than tagged directly. capex switched from "
+              "PaymentsToAcquirePropertyPlantAndEquipment (through ~2016) to "
+              "PaymentsToAcquireProductiveAssets since -- both now in schema.py's "
+              "fallback chain. Massive recent capex (~$132B FY2025) reflects real "
+              "AI/data-center buildout, not a data error. Not yet researched for "
+              "override candidates.",
     ),
     320193: CompanyProfile(
         cik=320193, name="Apple Inc.", ticker="AAPL", fiscal_year_end="~Sept (Sat nearest Sept 30)",

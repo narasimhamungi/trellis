@@ -80,6 +80,28 @@ def test_fill_derived_gaps_derives_operating_income_when_tag_absent():
     assert [d.canonical_name for d in derived] == ["operating_income"]
 
 
+def test_fill_derived_gaps_derives_sga_expense_when_no_consolidated_tag_exists():
+    """Mirrors the real Amazon gap: no single SG&A tag exists at all (five separate
+    expense categories -- Cost of sales, Fulfillment, Technology and content, Marketing,
+    G&A -- with no combining element). Gross Profit - Operating Income is exact by
+    definition regardless of how many categories a filer splits expenses into."""
+    table = {2025: {"gross_profit": 200_000.0, "operating_income": 80_000.0}}
+    derived = fill_derived_gaps(table)
+    assert table[2025]["sga_expense"] == 120_000.0
+    assert [d.canonical_name for d in derived] == ["sga_expense"]
+
+
+def test_fill_derived_gaps_does_not_derive_sga_or_operating_income_from_each_other():
+    """Neither rule may use a value the other just derived in the same pass -- if both
+    are genuinely missing, both must stay missing rather than one being silently
+    back-derived from the other's fallback."""
+    table = {2025: {"gross_profit": 200_000.0}}  # both sga_expense and operating_income absent
+    derived = fill_derived_gaps(table)
+    assert "sga_expense" not in table[2025]
+    assert "operating_income" not in table[2025]
+    assert derived == []
+
+
 def test_fill_derived_gaps_leaves_true_gaps_alone_when_inputs_also_missing():
     table = {2024: {"total_assets": 1_000.0}}  # no equity either -- can't derive liabilities
     derived = fill_derived_gaps(table)
