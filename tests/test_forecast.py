@@ -210,3 +210,90 @@ def test_run_forecast_produces_requested_horizon_and_stays_reconciled_throughout
 
     # Revenue should compound at the derived 10% growth rate every year, not drift.
     assert abs(forecast[2028]["revenue"] - 1100.0 * 1.10 ** 5) < 1e-3
+
+
+def test_project_year_caps_dividends_at_max_payout_ratio_of_net_income():
+    """The real risk found in the Nike forecast: growth_rate compounds a fixed rate with
+    no floor tied to earnings. Constructed so the uncapped growth-rate trajectory would
+    clearly exceed net income, to prove the ceiling actually binds."""
+    drivers = Drivers(
+        revenue_growth=0.0, gross_margin=0.40, sga_pct_revenue=0.20, tax_rate=0.20,
+        ar_days=30.0, inventory_days=100.0, ap_days=40.0, capex_pct_revenue=0.05,
+        da_pct_revenue=0.04, interest_rate=0.0, debt_repayment=0.0,
+        dividend_payout_ratio=0.20, dividend_growth_rate=1.00,  # doubling every year
+        dividend_policy="growth_rate", max_payout_ratio=1.0,
+    )
+    prior = {"revenue": 1000.0, "net_income": 176.0, "dividends_paid": 150.0,  # -> uncapped 300
+             "long_term_debt": 0.0, "ppe_net": 500.0, "total_assets": 900.0,
+             "total_liabilities": 400.0, "stockholders_equity": 500.0,
+             "cash_and_equivalents": 160.0, "accounts_receivable": 80.0,
+             "inventory": 90.0, "accounts_payable": 70.0, "retained_earnings": 300.0}
+    y = project_year(prior, drivers)
+
+    assert y["dividend_capped"] is True
+    assert abs(y["dividends_paid"] - y["net_income"] * 1.0) < 1e-6  # capped at 100% of NI
+    assert y["dividends_paid"] < 150.0 * 2.0  # meaningfully less than the uncapped 300
+
+
+def test_project_year_does_not_cap_when_comfortably_under_ceiling():
+    drivers = Drivers(
+        revenue_growth=0.10, gross_margin=0.40, sga_pct_revenue=0.20, tax_rate=0.20,
+        ar_days=30.0, inventory_days=100.0, ap_days=40.0, capex_pct_revenue=0.05,
+        da_pct_revenue=0.04, interest_rate=0.0, debt_repayment=0.0,
+        dividend_payout_ratio=0.20, dividend_growth_rate=0.05,
+        dividend_policy="growth_rate", max_payout_ratio=1.0,
+    )
+    prior = {"revenue": 1000.0, "net_income": 176.0, "dividends_paid": 60.0,
+             "long_term_debt": 0.0, "ppe_net": 500.0, "total_assets": 900.0,
+             "total_liabilities": 400.0, "stockholders_equity": 500.0,
+             "cash_and_equivalents": 160.0, "accounts_receivable": 80.0,
+             "inventory": 90.0, "accounts_payable": 70.0, "retained_earnings": 300.0}
+    y = project_year(prior, drivers)
+
+    assert y["dividend_capped"] is False
+    assert abs(y["dividends_paid"] - 60.0 * 1.05) < 1e-6  # untouched by the ceiling
+
+
+def test_project_year_ceiling_applies_to_payout_ratio_policy_too():
+    """The identical runaway risk exists if the derived average payout_ratio itself
+    exceeds 1.0 -- the ceiling isn't specific to growth_rate policy."""
+    drivers = Drivers(
+        revenue_growth=0.0, gross_margin=0.40, sga_pct_revenue=0.20, tax_rate=0.20,
+        ar_days=30.0, inventory_days=100.0, ap_days=40.0, capex_pct_revenue=0.05,
+        da_pct_revenue=0.04, interest_rate=0.0, debt_repayment=0.0,
+        dividend_payout_ratio=1.50, dividend_growth_rate=0.0,  # historically paid out 150% of NI
+        dividend_policy="payout_ratio", max_payout_ratio=1.0,
+    )
+    prior = {"revenue": 1000.0, "net_income": 176.0, "dividends_paid": 60.0,
+             "long_term_debt": 0.0, "ppe_net": 500.0, "total_assets": 900.0,
+             "total_liabilities": 400.0, "stockholders_equity": 500.0,
+             "cash_and_equivalents": 160.0, "accounts_receivable": 80.0,
+             "inventory": 90.0, "accounts_payable": 70.0, "retained_earnings": 300.0}
+    y = project_year(prior, drivers)
+
+    assert y["dividend_capped"] is True
+    assert abs(y["dividends_paid"] - y["net_income"]) < 1e-6  # capped at 100%, not 150%
+
+
+def test_run_forecast_capped_dividend_becomes_the_base_for_next_years_growth():
+    """No shadow trajectory: once the ceiling binds, the following year's growth-rate
+    compounding starts from the capped figure actually paid, not the uncapped one."""
+    drivers = Drivers(
+        revenue_growth=0.0, gross_margin=0.40, sga_pct_revenue=0.20, tax_rate=0.20,
+        ar_days=30.0, inventory_days=100.0, ap_days=40.0, capex_pct_revenue=0.05,
+        da_pct_revenue=0.04, interest_rate=0.0, debt_repayment=0.0,
+        dividend_payout_ratio=0.20, dividend_growth_rate=1.00,
+        dividend_policy="growth_rate", max_payout_ratio=1.0,
+    )
+    table = {2026: {"revenue": 1000.0, "net_income": 176.0, "dividends_paid": 150.0,
+                    "long_term_debt": 0.0, "ppe_net": 500.0, "total_assets": 900.0,
+                    "total_liabilities": 400.0, "stockholders_equity": 500.0,
+                    "cash_and_equivalents": 160.0, "accounts_receivable": 80.0,
+                    "inventory": 90.0, "accounts_payable": 70.0, "retained_earnings": 300.0}}
+    forecast = run_forecast(table, base_year=2026, drivers=drivers, years=2)
+
+    assert forecast[2027]["dividend_capped"] is True
+    # FY2028's uncapped growth-rate trajectory starts from FY2027's actual (capped) payout,
+    # not from the 150 * 2 * 2 = 600 an uncorrected compounding would imply.
+    naive_uncapped_year2 = 150.0 * 2.0 * 2.0
+    assert forecast[2028]["dividends_paid"] < naive_uncapped_year2

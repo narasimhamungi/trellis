@@ -42,6 +42,20 @@ class Drivers:
     dividend_payout_ratio: float  # used only when dividend_policy == "payout_ratio"
     dividend_growth_rate: float = 0.0     # used only when dividend_policy == "growth_rate"
     dividend_policy: str = "growth_rate"  # which of the two drivers above project_year uses
+    max_payout_ratio: float = 1.0  # hard ceiling on dividends_paid as a fraction of THIS
+    # year's net income, enforced in project_year regardless of dividend_policy. Without
+    # it, growth_rate compounds a fixed rate against flat-or-declining earnings with no
+    # floor tied to profitability -- confirmed against the real Nike forecast: 6.99%
+    # compounding against roughly flat ~$4.05B net income pushes the implied payout ratio
+    # from ~51% toward the low-80s% by FY2031, and nothing stopped it from continuing past
+    # 100% on a longer horizon or a flatter/worse earnings year. payout_ratio policy has
+    # the identical risk if the derived average itself exceeds 1.0. 1.0 (100%) is the
+    # default because it's the cleanest defensible line: a single year paying out more
+    # than it earned happens in practice (drawing on cash), but a *forecast* projecting
+    # that indefinitely is asserting an unsustainable trajectory as the base case, not
+    # modeling one. See project_year: once the ceiling binds in a given year, the
+    # following year's growth-rate compounding starts from the capped figure, not the
+    # uncapped one -- the model doesn't secretly remember a shadow trajectory.
     # Two genuinely different, both-legitimate models of how companies actually set
     # dividends. "payout_ratio" ties the dividend to THIS YEAR's earnings -- fine for a
     # company that targets a payout fraction. "growth_rate" extrapolates the dividend's
@@ -250,6 +264,9 @@ def project_year(prior: dict[str, float], drivers: Drivers) -> dict[str, float]:
         dividends_paid = max(prior.get("dividends_paid", 0.0) * (1 + drivers.dividend_growth_rate), 0.0)
     else:
         dividends_paid = max(net_income, 0.0) * drivers.dividend_payout_ratio
+    payout_ceiling = max(net_income, 0.0) * drivers.max_payout_ratio
+    dividend_capped = dividends_paid > payout_ceiling
+    dividends_paid = min(dividends_paid, payout_ceiling)
     retained_earnings = prior.get("retained_earnings", 0.0) + net_income - dividends_paid
 
     # "other" buckets this schema doesn't name -- carried flat, explicitly, from the
@@ -285,6 +302,7 @@ def project_year(prior: dict[str, float], drivers: Drivers) -> dict[str, float]:
         "accounts_payable": ap, "long_term_debt": long_term_debt,
         "total_liabilities": total_liabilities, "stockholders_equity": stockholders_equity,
         "retained_earnings": retained_earnings, "dividends_paid": dividends_paid,
+        "dividend_capped": dividend_capped,
         "capex": capex, "depreciation_amortization": da,
         "cfo": cfo, "cfi": cfi, "cff": cff,
     }

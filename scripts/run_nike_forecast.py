@@ -114,6 +114,9 @@ def main():
         if not check.passed:
             any_failed = True
             print(f"  !! self-consistency check FAILED: {check.detail}")
+        if y.get("dividend_capped"):
+            print(f"  note: dividend payout ceiling ({drivers.max_payout_ratio:.0%} of net "
+                  f"income) bound in FY{year} -- growth_rate trajectory would have exceeded it")
         prior_cash = y["cash_and_equivalents"]
 
     print("\n" + ("Every forecast year reconciled cleanly." if not any_failed
