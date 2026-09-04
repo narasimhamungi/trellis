@@ -1,4 +1,5 @@
 from trellis.forecast import (
+    Drivers,
     derive_drivers_from_history,
     project_year,
     reconcile_forecast_year,
@@ -38,10 +39,14 @@ def test_derive_drivers_matches_hand_calculation():
     assert abs(d.dividend_payout_ratio - 40 / 168) < 1e-9
     assert d.debt_repayment == 0.0  # no schedule info -- flat debt is the honest default
     assert d.overrides_applied == ()
-    # Only 2 years exist (2022 has revenue only) against the default 3-yr lookback --
-    # that shortfall itself must be flagged, not silently absorbed.
-    assert len(d.assumptions) == 1
-    assert "2 year" in d.assumptions[0]
+    # 2022 has no dividends_paid at all -- can't extrapolate a trend that doesn't exist,
+    # so growth_rate (the default policy) must fall back to payout_ratio for this driver.
+    assert d.dividend_policy == "payout_ratio"
+    # Two things to flag: the lookback shortfall (default is now 5 yrs, only 2 exist),
+    # and the dividend-growth-rate fallback. Neither should be silent.
+    assert len(d.assumptions) == 2
+    assert any("5-yr lookback" in a and "2 year" in a for a in d.assumptions)
+    assert any("dividend" in a and "payout_ratio" in a for a in d.assumptions)
 
 
 def test_derive_drivers_flags_assumption_when_interest_expense_untagged():
@@ -85,11 +90,55 @@ def test_derive_drivers_averages_ratios_across_the_lookback_window_not_just_base
     assert abs(d.inventory_days - 150.0) < 1e-6      # (100 + 150 + 200) / 3, not 200
     assert abs(d.dividend_payout_ratio - 0.40) < 1e-9  # (0.20 + 0.40 + 0.60) / 3, not 0.60
     assert abs(d.revenue_growth - 0.10) < 1e-9        # CAGR: (1210/1000)^(1/2) - 1 = 0.10 exactly
+    # Dividends grew every year in this fixture (60 -> 160 -> 300), so a real CAGR is
+    # computable -- growth_rate policy should be used as-is, no fallback.
+    assert d.dividend_policy == "growth_rate"
+    assert abs(d.dividend_growth_rate - (5 ** 0.5 - 1)) < 1e-9  # (300/60)^(1/2) - 1
     # Full 3-year window was available for every ratio actually present in the fixture --
     # the one flagged assumption is interest_rate, because this fixture has no debt data
     # at all (not what this test is checking), not a lookback-window shortfall.
     assert len(d.assumptions) == 1
     assert "interest_expense" in d.assumptions[0]
+
+
+def test_derive_drivers_dividend_policy_can_be_explicitly_set_to_payout_ratio():
+    """The growth_rate default is a choice, not a hard rule -- an analyst who has a
+    reason to expect a company to target a payout ratio (rather than smooth the
+    dividend the way Nike does) can select it explicitly."""
+    years = {
+        2030: {"revenue": 1000.0, "net_income": 300.0, "dividends_paid": 60.0},
+        2031: {"revenue": 1100.0, "net_income": 400.0, "dividends_paid": 160.0},
+        2032: {"revenue": 1210.0, "net_income": 500.0, "dividends_paid": 300.0},
+    }
+    d = derive_drivers_from_history(years, base_year=2032, lookback_years=3,
+                                     dividend_policy="payout_ratio")
+    assert d.dividend_policy == "payout_ratio"
+    assert abs(d.dividend_payout_ratio - 0.40) < 1e-9  # still averaged, just now the active driver
+    assert not any("payout_ratio" in a and "falling back" in a for a in d.assumptions)
+
+
+def test_project_year_dividend_policy_changes_the_forecasted_dividend():
+    """The whole point of the fix: growth_rate and payout_ratio give genuinely different
+    numbers for the same underlying drivers, not just different labels on the same math."""
+    base_drivers = {
+        "revenue_growth": 0.10, "gross_margin": 0.40, "sga_pct_revenue": 0.20, "tax_rate": 0.20,
+        "ar_days": 30.0, "inventory_days": 100.0, "ap_days": 40.0, "capex_pct_revenue": 0.05,
+        "da_pct_revenue": 0.04, "interest_rate": 0.0, "debt_repayment": 0.0,
+        "dividend_payout_ratio": 0.20, "dividend_growth_rate": 0.50,
+    }
+    prior = {"revenue": 1000.0, "net_income": 300.0, "dividends_paid": 60.0,
+             "long_term_debt": 0.0, "ppe_net": 500.0, "total_assets": 900.0,
+             "total_liabilities": 400.0, "stockholders_equity": 500.0,
+             "cash_and_equivalents": 160.0, "accounts_receivable": 80.0,
+             "inventory": 90.0, "accounts_payable": 70.0, "retained_earnings": 300.0}
+
+    growth_year = project_year(prior, Drivers(**base_drivers, dividend_policy="growth_rate"))
+    payout_year = project_year(prior, Drivers(**base_drivers, dividend_policy="payout_ratio"))
+
+    assert abs(growth_year["dividends_paid"] - 60.0 * 1.50) < 1e-6  # prior * (1 + growth)
+    assert abs(payout_year["net_income"] - growth_year["net_income"]) < 1e-9  # same NI either way
+    assert abs(payout_year["dividends_paid"] - payout_year["net_income"] * 0.20) < 1e-6
+    assert growth_year["dividends_paid"] != payout_year["dividends_paid"]  # genuinely different
 
 
 def test_derive_drivers_applies_a_sourced_override_and_records_it_distinctly_from_assumptions():
