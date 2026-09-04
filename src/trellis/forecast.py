@@ -26,6 +26,8 @@ from dataclasses import dataclass
 
 from .statements import AnnualTable, CheckResult
 
+DIVIDEND_GROWTH_SANITY_BAND = (-0.15, 0.50)  # see derive_drivers_from_history for why
+
 
 @dataclass(frozen=True)
 class Drivers:
@@ -276,6 +278,27 @@ def derive_drivers_from_history(
         assumptions.append(growth_note)
 
     dividend_growth_rate, div_growth_note = median_yoy_growth(lambda y: y.get("dividends_paid"), "dividend")
+    if not div_growth_note and dividend_policy == "growth_rate" and not (
+        DIVIDEND_GROWTH_SANITY_BAND[0] <= dividend_growth_rate <= DIVIDEND_GROWTH_SANITY_BAND[1]
+    ):
+        # A well-defined median can still be implausible -- confirmed against real Costco
+        # data: special dividends every ~2.75 years (2012, 2015, 2017, 2020, Jan 2024)
+        # mean a 5-year window quite often catches TWO of them, not one. With only 4
+        # year-over-year rates, 2 post-special-dividend reversions is enough to still
+        # dominate the median (switching from endpoint CAGR to median took the distortion
+        # from -21.5%/yr to -45.2%/yr -- worse, not better, because the problem isn't a
+        # single outlier, it's structural to how this filer pays dividends). No further
+        # cleverness on the raw growth rate fixes this reliably; the fix is recognizing
+        # the result is implausible for an ONGOING dividend policy and using the bounded
+        # alternative instead. This band is deliberately wide -- Nike's real +6.99% and
+        # Apple's real +1.61% both sit comfortably inside it -- catching only genuinely
+        # implausible sustained rates, not real fast dividend growth.
+        div_growth_note = (
+            f"Computed dividend growth rate ({dividend_growth_rate:.1%}/yr) is outside a "
+            f"plausible range for an ONGOING policy ({DIVIDEND_GROWTH_SANITY_BAND[0]:.0%} to "
+            f"{DIVIDEND_GROWTH_SANITY_BAND[1]:.0%}) -- likely a lumpy/irregular payment "
+            f"(e.g. a special dividend) distorting the series, not a real sustained trend."
+        )
     if div_growth_note and dividend_policy == "growth_rate":
         # Can't extrapolate a trend that doesn't exist yet (e.g. a company with no
         # dividend, or one just initiated inside the lookback window) -- fall back to

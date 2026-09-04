@@ -92,17 +92,50 @@ def test_derive_drivers_averages_ratios_across_the_lookback_window_not_just_base
     assert abs(d.inventory_days - 150.0) < 1e-6      # (100 + 150 + 200) / 3, not 200
     assert abs(d.dividend_payout_ratio - 0.40) < 1e-9  # (0.20 + 0.40 + 0.60) / 3, not 0.60
     assert abs(d.revenue_growth - 0.10) < 1e-9        # CAGR: (1210/1000)^(1/2) - 1 = 0.10 exactly
-    # Dividends grew every year in this fixture (60 -> 160 -> 300), so a real growth
-    # rate is computable -- growth_rate policy should be used as-is, no fallback.
+    # This fixture's dividends grow very aggressively (60 -> 160 -> 300, ~127%/yr median)
+    # to make payout-ratio averaging easy to verify by hand above -- that growth rate is
+    # itself implausible for an ongoing policy and correctly triggers the sanity-band
+    # fallback (see test_derive_drivers_dividend_growth_rejects_an_implausible_rate for
+    # a test of that mechanism specifically). dividend_payout_ratio is unaffected either
+    # way -- it's always computed regardless of which policy ends up active.
+    assert d.dividend_policy == "payout_ratio"
+    # Two flagged assumptions now: interest_rate (no debt data in this fixture -- not
+    # what this test is checking) and the dividend sanity-band fallback described above.
+    assert len(d.assumptions) == 2
+    assert any("interest_expense" in a for a in d.assumptions)
+    assert any("plausible range" in a for a in d.assumptions)
+
+
+def test_derive_drivers_dividend_growth_rejects_an_implausible_rate():
+    """The mechanism behind the real Costco fix: even a well-defined median can be
+    implausible for an ONGOING policy. Costco's actual case (two special dividends
+    inside one 5-year window) made the median worse than the endpoint CAGR it replaced
+    -- -45.2%/yr, not an improvement. No further cleverness on the raw series reliably
+    fixes that; recognizing the result itself is implausible and falling back to the
+    bounded payout_ratio driver does. Constructed with a steep-but-clean progression to
+    isolate the sanity-band check from the lumpy-outlier case already covered above."""
+    years = {
+        2023: {"revenue": 1000.0, "net_income": 100.0, "dividends_paid": 100.0},
+        2024: {"revenue": 1000.0, "net_income": 100.0, "dividends_paid": 60.0},   # -40%/yr
+        2025: {"revenue": 1000.0, "net_income": 100.0, "dividends_paid": 36.0},   # -40%/yr
+    }
+    d = derive_drivers_from_history(years, base_year=2025, lookback_years=3)
+    assert d.dividend_policy == "payout_ratio"  # -40%/yr is well outside the sanity band
+    assert any("plausible range" in a for a in d.assumptions)
+
+
+def test_derive_drivers_dividend_growth_within_sanity_band_is_used_as_is():
+    """Real Nike (+6.99%/yr) and Apple (+1.61%/yr) both sit comfortably inside the band
+    -- confirms it's wide enough not to interfere with genuinely ordinary dividend
+    growth, only implausible sustained rates."""
+    years = {
+        2023: {"revenue": 1000.0, "net_income": 100.0, "dividends_paid": 50.0},
+        2024: {"revenue": 1000.0, "net_income": 100.0, "dividends_paid": 53.5},  # +7%
+        2025: {"revenue": 1000.0, "net_income": 100.0, "dividends_paid": 57.2},  # +6.92%
+    }
+    d = derive_drivers_from_history(years, base_year=2025, lookback_years=3)
     assert d.dividend_policy == "growth_rate"
-    # Median of YoY growth rates, not endpoint CAGR: 160/60-1=1.6667, 300/160-1=0.875;
-    # median of 2 values is their average = 1.270833...
-    assert abs(d.dividend_growth_rate - 1.2708333333333333) < 1e-9
-    # Full 3-year window was available for every ratio actually present in the fixture --
-    # the one flagged assumption is interest_rate, because this fixture has no debt data
-    # at all (not what this test is checking), not a lookback-window shortfall.
-    assert len(d.assumptions) == 1
-    assert "interest_expense" in d.assumptions[0]
+    assert not any("plausible range" in a for a in d.assumptions)
 
 
 def test_derive_drivers_dividend_growth_uses_median_not_endpoint_cagr():
