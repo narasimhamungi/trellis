@@ -82,6 +82,18 @@ def fill_derived_gaps(table: AnnualTable) -> list[DerivedField]:
         if "total_liabilities" not in data and "total_assets" in data and "stockholders_equity" in data:
             data["total_liabilities"] = data["total_assets"] - data["stockholders_equity"]
             filled.append(DerivedField(year, "total_liabilities", "total_assets - stockholders_equity"))
+        if "gross_profit" not in data and "revenue" in data and "cost_of_revenue" in data:
+            # Some filers (Amazon, Costco among the ones tested here) don't tag a
+            # GrossProfit subtotal at all -- their income statement goes straight from
+            # revenue through cost of sales into other expense lines with no gross-profit
+            # line on the face of the statement. Deriving it from Revenue - Cost of
+            # Revenue is exact, and matters beyond just filling this one field: it's a
+            # dependency for the operating_income and sga_expense derivations below, and
+            # for gross_margin in forecast.derive_drivers_from_history. Without this,
+            # gross_margin silently averaged to 0.0 for Costco (confirmed against real
+            # data) because nothing downstream could compute it at all.
+            data["gross_profit"] = data["revenue"] - data["cost_of_revenue"]
+            filled.append(DerivedField(year, "gross_profit", "revenue - cost_of_revenue"))
         if "operating_income" not in data and "gross_profit" in data and "sga_expense" in data:
             data["operating_income"] = data["gross_profit"] - data["sga_expense"]
             filled.append(DerivedField(year, "operating_income", "gross_profit - sga_expense"))

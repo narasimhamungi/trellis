@@ -397,3 +397,30 @@ def test_derive_drivers_cash_floor_uses_minimum_not_average_ratio():
     }
     d = derive_drivers_from_history(years, base_year=2026, lookback_years=3)
     assert abs(d.cash_floor_pct_revenue - 0.10) < 1e-9  # min, not (0.40+0.10+0.30)/3 = 0.267
+
+
+def test_derive_drivers_flags_assumption_instead_of_silently_defaulting_when_a_ratio_has_no_data():
+    """The real bug found against live Costco data: gross_margin averaged to a silent
+    0.0 with no warning at all (empty list -> `avg(...) or 0.0`, indistinguishable from
+    a genuinely-computed 0%), because the ratio checked for a literal 'gross_profit' key
+    that Costco doesn't tag. The forecast built on it printed five years of large losses
+    and still said 'reconciled cleanly' -- self-consistency was never the failure, an
+    unflagged bad input was. Constructed here with a year that has NEITHER gross_profit
+    NOR cost_of_revenue, so the gap is genuine, not just this one company's tagging."""
+    years = {2026: {"revenue": 1000.0, "sga_expense": 100.0, "net_income": 50.0,
+                     "income_tax_expense": 10.0, "accounts_receivable": 20.0,
+                     "inventory": 30.0, "accounts_payable": 15.0, "capex": 5.0,
+                     "depreciation_amortization": 3.0}}  # no gross_profit, no cost_of_revenue
+    d = derive_drivers_from_history(years, base_year=2026, lookback_years=1)
+    assert d.gross_margin == 0.0  # still 0.0 -- but now it must be flagged, not silent
+    assert any("gross_margin" in a and "no data available" in a for a in d.assumptions)
+
+
+def test_derive_drivers_gross_margin_falls_back_to_cost_of_revenue_when_gross_profit_absent():
+    """Belt-and-suspenders: derive_drivers_from_history can be called directly on a table
+    that never went through fill_derived_gaps, so this fallback needs to work here too,
+    not just rely on the pipeline having already derived gross_profit upstream."""
+    years = {2026: {"revenue": 1000.0, "cost_of_revenue": 600.0}}  # no gross_profit key at all
+    d = derive_drivers_from_history(years, base_year=2026, lookback_years=1)
+    assert abs(d.gross_margin - 0.40) < 1e-9  # (1000-600)/1000, not silently 0.0
+    assert not any("gross_margin" in a for a in d.assumptions)

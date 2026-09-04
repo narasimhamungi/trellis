@@ -109,6 +109,29 @@ def test_fill_derived_gaps_leaves_true_gaps_alone_when_inputs_also_missing():
     assert derived == []
 
 
+def test_fill_derived_gaps_derives_gross_profit_from_revenue_minus_cost_of_revenue():
+    """Mirrors the real gap found against live Amazon and Costco data: neither tags a
+    GrossProfit subtotal at all. Matters beyond this one field -- it's a dependency for
+    the operating_income and sga_expense derivations, and for gross_margin downstream in
+    forecast.py, none of which could resolve at all without this."""
+    table = {2025: {"revenue": 1_000.0, "cost_of_revenue": 750.0}}
+    derived = fill_derived_gaps(table)
+    assert table[2025]["gross_profit"] == 250.0
+    assert [d.canonical_name for d in derived] == ["gross_profit"]
+
+
+def test_fill_derived_gaps_gross_profit_feeds_the_other_derivations_in_the_same_pass():
+    """Ordering check: gross_profit must derive before operating_income/sga_expense try
+    to use it, in the same call, not just across separate calls."""
+    table = {2025: {"revenue": 1_000.0, "cost_of_revenue": 750.0, "operating_income": 100.0}}
+    derived = fill_derived_gaps(table)
+    names = [d.canonical_name for d in derived]
+    assert "gross_profit" in names
+    assert table[2025]["gross_profit"] == 250.0
+    assert "sga_expense" in names
+    assert table[2025]["sga_expense"] == 150.0  # 250 - 100, using the gross_profit just derived
+
+
 # --- balance_sheet_balances (hard invariant) --------------------------------
 
 CLEAN_YEAR = {

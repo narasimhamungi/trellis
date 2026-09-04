@@ -186,8 +186,25 @@ def derive_drivers_from_history(
                 out.append(v)
         return out
 
-    def avg(vals):
-        return sum(vals) / len(vals) if vals else None
+    def avg(vals, driver_name):
+        """No silent zeros: an empty list means nothing in the lookback window could
+        produce this driver at all, and 0.0 is very rarely the economically correct
+        stand-in (a 0% gross margin, 0-day receivables, etc. are all almost always
+        wrong, not neutral). Confirmed as a real, serious gap against live Costco data:
+        gross_margin silently averaged to 0.0 with no warning, producing a forecast with
+        five years of large losses that still printed 'reconciled cleanly' -- internal
+        self-consistency was never the problem, an unflagged bad input was. Every
+        averaged driver goes through this now, not just the ones that have already
+        caused a visible failure."""
+        if not vals:
+            assumptions.append(
+                f"{driver_name}: no data available in any lookback year -- assumed 0.0. "
+                f"This is very likely wrong, not a neutral default -- check whether the "
+                f"underlying tag needs a fallback added (see scripts/diagnose_tags.py) "
+                f"before trusting any forecast built on this driver."
+            )
+            return 0.0
+        return sum(vals) / len(vals)
 
     def ratio(y, num_key, denom_key=None, use_cogs=False):
         if num_key not in y:
@@ -206,7 +223,14 @@ def derive_drivers_from_history(
         periods = len(years) - 1
         return (v_last / v_first) ** (1 / periods) - 1, None
 
-    gross_margins = yearly(lambda y: ratio(y, "gross_profit", "revenue"))
+    def gross_profit_for_year(y):
+        if "gross_profit" in y:
+            return y["gross_profit"]
+        cogs = _cogs_for_year(y)
+        return y["revenue"] - cogs if cogs is not None and "revenue" in y else None
+
+    gross_margins = yearly(lambda y: gross_profit_for_year(y) / y["revenue"]
+                            if gross_profit_for_year(y) is not None and y.get("revenue") else None)
     sga_pcts = yearly(lambda y: ratio(y, "sga_expense", "revenue"))
     tax_rates = yearly(lambda y: y["income_tax_expense"] / (y["net_income"] + y["income_tax_expense"])
                         if "income_tax_expense" in y and "net_income" in y
@@ -239,7 +263,7 @@ def derive_drivers_from_history(
         rates = yearly(lambda y: y["interest_expense"] / y["long_term_debt"]
                         if "interest_expense" in y and y.get("long_term_debt") else None)
         if rates:
-            interest_rate = avg(rates)
+            interest_rate = avg(rates, "interest_rate")
         else:
             interest_rate = 0.0
             assumptions.append(
@@ -274,17 +298,17 @@ def derive_drivers_from_history(
 
     return Drivers(
         revenue_growth=revenue_growth,
-        gross_margin=avg(gross_margins) or 0.0,
-        sga_pct_revenue=avg(sga_pcts) or 0.0,
-        tax_rate=avg(tax_rates) or 0.0,
-        ar_days=avg(ar_days_list) or 0.0,
-        inventory_days=avg(inv_days_list) or 0.0,
-        ap_days=avg(ap_days_list) or 0.0,
-        capex_pct_revenue=avg(capex_pcts) or 0.0,
-        da_pct_revenue=avg(da_pcts) or 0.0,
+        gross_margin=avg(gross_margins, "gross_margin"),
+        sga_pct_revenue=avg(sga_pcts, "sga_pct_revenue"),
+        tax_rate=avg(tax_rates, "tax_rate"),
+        ar_days=avg(ar_days_list, "ar_days"),
+        inventory_days=avg(inv_days_list, "inventory_days"),
+        ap_days=avg(ap_days_list, "ap_days"),
+        capex_pct_revenue=avg(capex_pcts, "capex_pct_revenue"),
+        da_pct_revenue=avg(da_pcts, "da_pct_revenue"),
         interest_rate=interest_rate,
         debt_repayment=debt_repayment,
-        dividend_payout_ratio=avg(payout_ratios) or 0.0,
+        dividend_payout_ratio=avg(payout_ratios, "dividend_payout_ratio"),
         dividend_growth_rate=dividend_growth_rate,
         dividend_policy=dividend_policy,
         capital_return_policy=capital_return_policy,

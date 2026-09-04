@@ -40,11 +40,24 @@ def missing_fields(data):
     return missing
 
 
-def pick_base_year(table):
+def pick_base_year(table, max_staleness=5):
+    """Most recent year with everything the forecast needs -- but capped at
+    `max_staleness` years behind the newest year with ANY data at all, rather than
+    silently walking back an unbounded distance. Confirmed as a real failure mode
+    against live Amazon data: recent years were missing sga_expense (no consolidated
+    SG&A tag -- since fixed via an identity-based derivation, but this safeguard stays
+    regardless of that fix, because SOME future gap on SOME other company could trigger
+    the identical failure), so the old version silently walked back to FY2009 -- a
+    company with ~$24.5B revenue standing in for one with ~$638B today. Returns
+    (year_or_None, newest_year_with_any_data) so the caller can report why a refusal
+    happened, not just that it did."""
+    newest = max(table)
     for year in sorted(table, reverse=True):
+        if newest - year > max_staleness:
+            return None, newest
         if not missing_fields(table[year]):
-            return year
-    return None
+            return year, newest
+    return None, newest
 
 
 def main():
@@ -75,9 +88,14 @@ def main():
         gaps = missing_fields(table[year])
         print(f"  FY{year}: {'complete' if not gaps else 'missing ' + str(gaps)}")
 
-    base_year = pick_base_year(table)
+    base_year, newest_year = pick_base_year(table)
     if base_year is None:
-        print("\nNo year has everything the forecast needs -- see gaps above.")
+        print(f"\nNo year within 5 years of the most recent data (FY{newest_year}) has "
+              f"everything the forecast needs -- see gaps above. Refusing to silently fall "
+              f"back further; that's what let a real run for a different company forecast "
+              f"off 16-year-stale data. Add a tag fallback (see scripts/diagnose_tags.py) "
+              f"for whichever field is blocking the recent years, rather than widening this "
+              f"limit.")
         return
     print(f"\nBase year for the forecast: FY{base_year}")
 
