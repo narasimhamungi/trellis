@@ -297,3 +297,103 @@ def test_run_forecast_capped_dividend_becomes_the_base_for_next_years_growth():
     # not from the 150 * 2 * 2 = 600 an uncorrected compounding would imply.
     naive_uncapped_year2 = 150.0 * 2.0 * 2.0
     assert forecast[2028]["dividends_paid"] < naive_uncapped_year2
+
+
+# --- Capital-return module (floor-and-sweep buybacks) ---
+# Fixture deliberately zeroes out AR/inventory/AP/PPE/capex/D&A/debt so the balance-sheet
+# arithmetic reduces to something checkable by hand: with those at zero, non_cash_assets
+# stays 0 every year, isolating the buyback mechanism from everything else this engine
+# already does. Hand-worked before running, same discipline as the original cash-as-plug
+# proof.
+
+_SWEEP_DRIVERS = Drivers(
+    revenue_growth=0.0, gross_margin=0.50, sga_pct_revenue=0.20, tax_rate=0.20,
+    ar_days=0.0, inventory_days=0.0, ap_days=0.0, capex_pct_revenue=0.0, da_pct_revenue=0.0,
+    interest_rate=0.0, debt_repayment=0.0, dividend_payout_ratio=0.0, dividend_growth_rate=0.0,
+    dividend_policy="payout_ratio",  # 0 either way -- picks the simpler branch
+    capital_return_policy="sweep_to_buybacks", cash_floor_pct_revenue=0.30,
+)
+
+_SWEEP_PRIOR = {
+    "revenue": 1000.0, "long_term_debt": 0.0, "ppe_net": 0.0,
+    "total_assets": 500.0, "total_liabilities": 100.0, "stockholders_equity": 400.0,
+    "cash_and_equivalents": 500.0, "accounts_receivable": 0.0, "inventory": 0.0,
+    "accounts_payable": 0.0, "retained_earnings": 400.0,
+}
+# Hand-derived expectation: NI = (1000*0.5 - 1000*0.2) * (1-0.2) = 300 * 0.8 = 240.
+# equity_before_buybacks = 400 + 240 - 0 = 640. non_cash_assets = 0 (all zeroed).
+# other_liab_and_equity (flat carry) = 100 + 400 - 0 - 0 - 400 = 100.
+# cash_before_buybacks = (0 + 0 + 100 + 640) - 0 = 740.
+# floor = 1000 * 0.30 = 300. buybacks = 740 - 300 = 440. cash_after = 300 exactly.
+
+
+def test_project_year_sweeps_excess_cash_to_buybacks_and_lands_exactly_at_floor():
+    y = project_year(_SWEEP_PRIOR, _SWEEP_DRIVERS)
+    assert abs(y["net_income"] - 240.0) < 1e-6
+    assert abs(y["buybacks"] - 440.0) < 1e-6
+    assert abs(y["cash_and_equivalents"] - 300.0) < 1e-6  # exactly the floor, not below
+    assert abs(y["stockholders_equity"] - 200.0) < 1e-6   # 640 - 440
+    assert abs(y["retained_earnings"] - 200.0) < 1e-6      # 400 + 240 - 0 - 440
+    assert abs(y["total_assets"] - (y["total_liabilities"] + y["stockholders_equity"])) < 1e-6
+
+
+def test_project_year_sweep_preserves_self_consistency():
+    y = project_year(_SWEEP_PRIOR, _SWEEP_DRIVERS)
+    result = reconcile_forecast_year(2027, y, prior_cash=_SWEEP_PRIOR["cash_and_equivalents"])
+    assert result.passed, result.detail  # buybacks are in CFF; plug and CF-implied change still agree
+
+
+def test_project_year_no_buyback_when_cash_is_already_below_the_floor():
+    high_floor_drivers = Drivers(
+        **{**_SWEEP_DRIVERS.__dict__, "cash_floor_pct_revenue": 0.80},  # floor = 800 > 740 available
+    )
+    y = project_year(_SWEEP_PRIOR, high_floor_drivers)
+    assert y["buybacks"] == 0.0
+    assert abs(y["cash_and_equivalents"] - 740.0) < 1e-6  # left as computed, not forced up to the floor
+
+
+def test_project_year_no_buyback_when_policy_is_none():
+    no_policy_drivers = Drivers(**{**_SWEEP_DRIVERS.__dict__, "capital_return_policy": "none"})
+    y = project_year(_SWEEP_PRIOR, no_policy_drivers)
+    assert y["buybacks"] == 0.0
+    assert abs(y["cash_and_equivalents"] - 740.0) < 1e-6  # the old cash-as-plug figure, untouched
+
+
+def test_run_forecast_cash_stabilizes_at_the_floor_instead_of_pooling():
+    """The actual fix for the real gap found in the Nike run: with revenue held flat,
+    excess cash should get swept back to the floor every single year, not compound."""
+    forecast = run_forecast({2026: _SWEEP_PRIOR}, base_year=2026, drivers=_SWEEP_DRIVERS, years=3)
+    for year in sorted(forecast):
+        assert abs(forecast[year]["cash_and_equivalents"] - 300.0) < 1e-6, (
+            f"FY{year} cash pooled instead of staying at the floor: "
+            f"{forecast[year]['cash_and_equivalents']}"
+        )
+
+
+def test_derive_drivers_auto_detects_sweep_policy_from_buyback_history():
+    years = {
+        2024: {"revenue": 1000.0, "cash_and_equivalents": 200.0, "buybacks": 50.0},
+        2025: {"revenue": 1100.0, "cash_and_equivalents": 250.0, "buybacks": 60.0},
+        2026: {"revenue": 1210.0, "cash_and_equivalents": 240.0, "buybacks": 0.0},  # a quiet year
+    }
+    d = derive_drivers_from_history(years, base_year=2026, lookback_years=3)
+    assert d.capital_return_policy == "sweep_to_buybacks"  # any year with real buybacks is enough
+
+
+def test_derive_drivers_defaults_to_no_capital_return_without_buyback_history():
+    years = {
+        2024: {"revenue": 1000.0, "cash_and_equivalents": 200.0},
+        2025: {"revenue": 1100.0, "cash_and_equivalents": 250.0},
+    }
+    d = derive_drivers_from_history(years, base_year=2025, lookback_years=2)
+    assert d.capital_return_policy == "none"  # never invents a buyback policy from nothing
+
+
+def test_derive_drivers_cash_floor_uses_minimum_not_average_ratio():
+    years = {
+        2024: {"revenue": 1000.0, "cash_and_equivalents": 400.0},  # ratio 0.40
+        2025: {"revenue": 1000.0, "cash_and_equivalents": 100.0},  # ratio 0.10 -- the real floor
+        2026: {"revenue": 1000.0, "cash_and_equivalents": 300.0},  # ratio 0.30
+    }
+    d = derive_drivers_from_history(years, base_year=2026, lookback_years=3)
+    assert abs(d.cash_floor_pct_revenue - 0.10) < 1e-9  # min, not (0.40+0.10+0.30)/3 = 0.267

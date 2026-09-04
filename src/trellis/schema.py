@@ -87,6 +87,9 @@ SCHEMA: tuple[LineItem, ...] = (
              instant=False),
     LineItem("dividends_paid", Statement.CASHFLOW,
              ("PaymentsOfDividendsCommonStock", "PaymentsOfDividends"), instant=False),
+    LineItem("buybacks", Statement.CASHFLOW,
+             ("PaymentsForRepurchaseOfCommonStock", "PaymentsForRepurchaseOfEquity"),
+             instant=False),
 )
 
 BY_NAME = {item.canonical_name: item for item in SCHEMA}

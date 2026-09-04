@@ -43,7 +43,11 @@ REGISTRY: dict[int, CompanyProfile] = {
               "manufacturer, finished-goods-only inventory), InventoryNet only for "
               "FY2009-2011. Heavy share buybacks retired through RE, not treasury "
               "stock -- expect the retained_earnings_rollforward soft check to flag "
-              "every year; that's a real capital-allocation fact, not a data bug.",
+              "every year historically, and expect capital_return_policy to "
+              "auto-detect as sweep_to_buybacks (real repurchase history every year "
+              "in the lookback window) -- without it, projected cash pools "
+              "unrealistically since Nike returns most FCF via buybacks, not "
+              "dividends.",
     ),
     909832: CompanyProfile(
         cik=909832, name="Costco Wholesale Corporation", ticker="COST",

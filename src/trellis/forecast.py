@@ -42,6 +42,30 @@ class Drivers:
     dividend_payout_ratio: float  # used only when dividend_policy == "payout_ratio"
     dividend_growth_rate: float = 0.0     # used only when dividend_policy == "growth_rate"
     dividend_policy: str = "growth_rate"  # which of the two drivers above project_year uses
+    capital_return_policy: str = "none"  # "sweep_to_buybacks" or "none"
+    cash_floor_pct_revenue: float = 0.0  # target minimum cash balance, as % of that
+    # year's revenue; only used when capital_return_policy == "sweep_to_buybacks"
+    # Floor-and-sweep, not a fixed % of FCF: a fixed percentage is itself an invented
+    # number and doesn't actually prevent cash from pooling (a "conservative" fixed %
+    # still lets excess accumulate whenever FCF is unusually high). A target minimum
+    # balance is self-correcting by construction -- nothing above the floor can ever
+    # pool, regardless of how FCF varies year to year.
+    #
+    # Floor defined as % of REVENUE, not % of assets: operating cash needs scale with
+    # the business's actual activity (transaction volume, payroll, working-capital
+    # cushion), not with total assets, which includes PP&E, goodwill, and other items
+    # unrelated to day-to-day liquidity -- and which is itself partly determined by the
+    # cash balance, making it a circular denominator for a cash policy variable.
+    #
+    # Derived as the MINIMUM historical cash/revenue ratio over the lookback window, not
+    # the average: a floor should represent the most conservative cushion the company has
+    # actually operated with, not a central tendency -- averaging would trigger "excess"
+    # sweeps even in years that were perfectly ordinary for that company.
+    #
+    # capital_return_policy defaults to "sweep_to_buybacks" ONLY when the historical data
+    # shows the company actually repurchasing shares -- a company with no buyback history
+    # doesn't get one invented for it just because it generates cash. See
+    # derive_drivers_from_history for the detection logic.
     max_payout_ratio: float = 1.0  # hard ceiling on dividends_paid as a fraction of THIS
     # year's net income, enforced in project_year regardless of dividend_policy. Without
     # it, growth_rate compounds a fixed rate against flat-or-declining earnings with no
@@ -96,6 +120,7 @@ def derive_drivers_from_history(
     lookback_years: int = 5,
     overrides: dict[str, tuple[float, str]] | None = None,
     dividend_policy: str = "growth_rate",
+    capital_return_policy: str | None = None,
 ) -> Drivers:
     """Ratio-based drivers are averaged over the trailing `lookback_years` (default 5)
     ending at base_year -- not read off a single year. A single-year snapshot is fragile
@@ -126,6 +151,11 @@ def derive_drivers_from_history(
     'payout_ratio' ties it to each year's own net income. See Drivers.dividend_policy for
     why growth_rate is the default. Whichever is picked, both are always computed here so
     the caller can compare.
+
+    `capital_return_policy`: None (default) auto-detects from history -- 'sweep_to_buybacks'
+    if the filer repurchased shares in any lookback year, else 'none'. Pass 'sweep_to_buybacks'
+    or 'none' explicitly to override the detection. See Drivers.capital_return_policy for
+    the floor-and-sweep mechanism itself.
 
     `overrides`: {driver_name: (value, source_citation)}. For a driver that can't be
     derived from tagged data in any lookback year at all, supply a cited value instead of
@@ -221,6 +251,27 @@ def derive_drivers_from_history(
     if debt_repayment_source:
         overrides_applied.append(f"debt_repayment = {debt_repayment:,.0f} -- {debt_repayment_source}")
 
+    if capital_return_policy is None:
+        has_buybacks = any(y.get("buybacks", 0.0) > 0 for y in (table[yr] for yr in years))
+        capital_return_policy = "sweep_to_buybacks" if has_buybacks else "none"
+    elif capital_return_policy not in ("sweep_to_buybacks", "none"):
+        raise ValueError(
+            f"capital_return_policy must be 'sweep_to_buybacks' or 'none', got {capital_return_policy!r}"
+        )
+
+    cash_ratios = yearly(lambda y: y["cash_and_equivalents"] / y["revenue"]
+                          if "cash_and_equivalents" in y and y.get("revenue") else None)
+    if cash_ratios:
+        cash_floor_pct_revenue = min(cash_ratios)
+    else:
+        cash_floor_pct_revenue = 0.0
+        if capital_return_policy == "sweep_to_buybacks":
+            assumptions.append(
+                "capital_return_policy is sweep_to_buybacks but no year had both cash and "
+                "revenue data to derive a cash floor -- cash_floor_pct_revenue assumed 0.0 "
+                "(sweeps ALL cash to buybacks every year, likely too aggressive)"
+            )
+
     return Drivers(
         revenue_growth=revenue_growth,
         gross_margin=avg(gross_margins) or 0.0,
@@ -236,6 +287,8 @@ def derive_drivers_from_history(
         dividend_payout_ratio=avg(payout_ratios) or 0.0,
         dividend_growth_rate=dividend_growth_rate,
         dividend_policy=dividend_policy,
+        capital_return_policy=capital_return_policy,
+        cash_floor_pct_revenue=cash_floor_pct_revenue,
         years_used=tuple(years),
         assumptions=tuple(assumptions),
         overrides_applied=tuple(overrides_applied),
@@ -267,7 +320,7 @@ def project_year(prior: dict[str, float], drivers: Drivers) -> dict[str, float]:
     payout_ceiling = max(net_income, 0.0) * drivers.max_payout_ratio
     dividend_capped = dividends_paid > payout_ceiling
     dividends_paid = min(dividends_paid, payout_ceiling)
-    retained_earnings = prior.get("retained_earnings", 0.0) + net_income - dividends_paid
+    equity_before_buybacks = prior.get("stockholders_equity", 0.0) + net_income - dividends_paid
 
     # "other" buckets this schema doesn't name -- carried flat, explicitly, from the
     # last actual year rather than silently dropped to zero.
@@ -279,19 +332,36 @@ def project_year(prior: dict[str, float], drivers: Drivers) -> dict[str, float]:
         - prior.get("stockholders_equity", 0.0)
 
     non_cash_assets = ar + inventory + ppe_net + other_assets
-    stockholders_equity = prior.get("stockholders_equity", 0.0) + net_income - dividends_paid
-    total_liabilities_and_equity = (
-        ap + long_term_debt + other_liabilities_and_equity + stockholders_equity
+    total_liabilities_and_equity_before = (
+        ap + long_term_debt + other_liabilities_and_equity + equity_before_buybacks
     )
-    cash_and_equivalents = total_liabilities_and_equity - non_cash_assets  # the plug
+    cash_before_buybacks = total_liabilities_and_equity_before - non_cash_assets  # the plug
 
+    # --- Capital return: floor-and-sweep buybacks ---
+    # Cash and equity drop by the identical dollar amount, so the balance-sheet identity
+    # proven for the plug above (total_liabilities_and_equity == cash + non_cash_assets)
+    # is preserved automatically -- subtracting the same number from both sides of an
+    # equality that already held keeps it holding. Retiring through retained earnings,
+    # not treasury stock: matches how Nike (and, per the registry, likely other heavy
+    # repurchasers) actually books it, and is the simplest approach that still closes
+    # the historical retained_earnings_rollforward gap going forward.
+    if drivers.capital_return_policy == "sweep_to_buybacks":
+        cash_floor = revenue * drivers.cash_floor_pct_revenue
+        buybacks = max(cash_before_buybacks - cash_floor, 0.0)
+    else:
+        buybacks = 0.0
+
+    cash_and_equivalents = cash_before_buybacks - buybacks
+    stockholders_equity = equity_before_buybacks - buybacks
+    total_liabilities_and_equity = total_liabilities_and_equity_before - buybacks
     total_assets = cash_and_equivalents + non_cash_assets
     total_liabilities = total_liabilities_and_equity - stockholders_equity
+    retained_earnings = prior.get("retained_earnings", 0.0) + net_income - dividends_paid - buybacks
 
     cfo = net_income + da - (ar - prior.get("accounts_receivable", 0.0)) \
         - (inventory - prior.get("inventory", 0.0)) + (ap - prior.get("accounts_payable", 0.0))
     cfi = -capex
-    cff = -drivers.debt_repayment - dividends_paid
+    cff = -drivers.debt_repayment - dividends_paid - buybacks
 
     return {
         "revenue": revenue, "cost_of_revenue": cogs, "gross_profit": gross_profit,
@@ -302,7 +372,7 @@ def project_year(prior: dict[str, float], drivers: Drivers) -> dict[str, float]:
         "accounts_payable": ap, "long_term_debt": long_term_debt,
         "total_liabilities": total_liabilities, "stockholders_equity": stockholders_equity,
         "retained_earnings": retained_earnings, "dividends_paid": dividends_paid,
-        "dividend_capped": dividend_capped,
+        "dividend_capped": dividend_capped, "buybacks": buybacks,
         "capex": capex, "depreciation_amortization": da,
         "cfo": cfo, "cfi": cfi, "cff": cff,
     }

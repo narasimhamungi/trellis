@@ -109,13 +109,14 @@ def main():
     forecast = run_forecast(table, base_year, drivers, years=args.years)
 
     print(f"\n--- {args.years}-year forecast (FY{base_year + 1}-FY{base_year + args.years}), $ millions ---")
-    print(f"{'Year':<8}{'Revenue':>12}{'NetIncome':>12}{'Cash':>12}{'TotalAssets':>14}")
+    print(f"{'Year':<8}{'Revenue':>12}{'NetIncome':>12}{'Buybacks':>11}{'Cash':>12}{'TotalAssets':>14}")
     prior_cash = table[base_year]["cash_and_equivalents"]
     any_failed = False
     for year in sorted(forecast):
         y = forecast[year]
         print(f"FY{year:<6}{y['revenue'] / 1e6:>12,.0f}{y['net_income'] / 1e6:>12,.0f}"
-              f"{y['cash_and_equivalents'] / 1e6:>12,.0f}{y['total_assets'] / 1e6:>14,.0f}")
+              f"{y['buybacks'] / 1e6:>11,.0f}{y['cash_and_equivalents'] / 1e6:>12,.0f}"
+              f"{y['total_assets'] / 1e6:>14,.0f}")
         check = reconcile_forecast_year(year, y, prior_cash)
         if not check.passed:
             any_failed = True
