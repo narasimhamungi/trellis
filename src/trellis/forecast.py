@@ -52,6 +52,12 @@ class Drivers:
     # downturn that would have implied a falling payout-ratio-based dividend -- Nike was
     # visibly defending the dividend, not sizing it to that year's income. growth_rate is
     # the default for that reason, not because payout_ratio is wrong in general.
+    years_used: tuple[int, ...] = ()  # the actual lookback window that produced these
+    # numbers. Exists so nothing downstream (a report, a script, a print statement) ever
+    # has to recompute or hardcode which years were used -- a caller that guesses this
+    # from `lookback_years` and `base_year` independently can silently drift out of sync
+    # if the default changes, which is exactly what happened once already in this
+    # project's own example script before this field existed.
     assumptions: tuple[str, ...] = ()        # last-resort defaults: no data, no override
     overrides_applied: tuple[str, ...] = ()  # analyst-sourced, cited values used in place
     # of auto-derivation -- for a driver that genuinely can't be pulled from tagged filing
@@ -216,6 +222,7 @@ def derive_drivers_from_history(
         dividend_payout_ratio=avg(payout_ratios) or 0.0,
         dividend_growth_rate=dividend_growth_rate,
         dividend_policy=dividend_policy,
+        years_used=tuple(years),
         assumptions=tuple(assumptions),
         overrides_applied=tuple(overrides_applied),
     )

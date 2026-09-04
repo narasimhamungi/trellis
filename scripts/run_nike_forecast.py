@@ -85,9 +85,10 @@ def main():
     drivers = derive_drivers_from_history(
         table, base_year, overrides={"interest_rate": (0.0314, source_note)},
     )
-    print(f"\n--- Drivers derived from FY{base_year - 2}-FY{base_year} (3-yr trailing average) ---")
+    print(f"\n--- Drivers derived from FY{drivers.years_used[0]}-FY{drivers.years_used[-1]} "
+          f"({len(drivers.years_used)}-yr trailing average) ---")
     for field, value in drivers.__dict__.items():
-        if field in ("assumptions", "overrides_applied"):
+        if field in ("assumptions", "overrides_applied", "years_used"):
             continue
         print(f"  {field}: {value:.4f}" if isinstance(value, float) else f"  {field}: {value}")
     if drivers.overrides_applied:

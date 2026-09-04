@@ -39,6 +39,7 @@ def test_derive_drivers_matches_hand_calculation():
     assert abs(d.dividend_payout_ratio - 40 / 168) < 1e-9
     assert d.debt_repayment == 0.0  # no schedule info -- flat debt is the honest default
     assert d.overrides_applied == ()
+    assert d.years_used == (2022, 2023)
     # 2022 has no dividends_paid at all -- can't extrapolate a trend that doesn't exist,
     # so growth_rate (the default policy) must fall back to payout_ratio for this driver.
     assert d.dividend_policy == "payout_ratio"
@@ -85,6 +86,7 @@ def test_derive_drivers_averages_ratios_across_the_lookback_window_not_just_base
                "capex": 60.5, "depreciation_amortization": 48.4, "sga_expense": 242.0},
     }
     d = derive_drivers_from_history(years, base_year=2032, lookback_years=3)
+    assert d.years_used == (2030, 2031, 2032)
 
     assert abs(d.gross_margin - 0.40) < 1e-9        # (0.30 + 0.40 + 0.50) / 3
     assert abs(d.inventory_days - 150.0) < 1e-6      # (100 + 150 + 200) / 3, not 200
