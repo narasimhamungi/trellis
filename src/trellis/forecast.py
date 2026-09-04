@@ -306,6 +306,25 @@ def derive_drivers_from_history(
         # and say so.
         assumptions.append(div_growth_note + " -- falling back to payout_ratio policy for this driver")
         dividend_policy = "payout_ratio"
+        if "plausible range" in div_growth_note:
+            # The fallback lands on a SAFER driver (bounded by max_payout_ratio, can't
+            # run away to a negative trajectory the way the rejected growth rate could),
+            # not necessarily an ACCURATE one -- confirmed against real Costco data:
+            # dividend_payout_ratio is averaged over this exact same lookback window,
+            # so the same special-dividend years that broke the growth rate are sitting
+            # inside this ratio too, just diluted across 5 years' worth of payout ratios
+            # instead of concentrated in 4 growth deltas. Splitting regular from special
+            # dividends would need quarter-level parsing this schema doesn't do -- out
+            # of scope here, but the resulting payout_ratio likely overstates the
+            # sustainable rate for a filer with periodic special dividends, and that
+            # needs to be visible, not just the fact that a fallback happened.
+            assumptions.append(
+                "dividend_payout_ratio (now the active driver) is averaged over the same "
+                "lookback window that made the growth rate implausible -- it likely also "
+                "overstates the sustainable payout rate, just less dramatically than the "
+                "rejected growth rate did. Not corrected for here (would need separating "
+                "regular from special dividends, which this schema doesn't parse)."
+            )
 
     if "interest_rate" in overrides:
         interest_rate, source = overrides["interest_rate"]

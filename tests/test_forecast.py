@@ -99,11 +99,13 @@ def test_derive_drivers_averages_ratios_across_the_lookback_window_not_just_base
     # a test of that mechanism specifically). dividend_payout_ratio is unaffected either
     # way -- it's always computed regardless of which policy ends up active.
     assert d.dividend_policy == "payout_ratio"
-    # Two flagged assumptions now: interest_rate (no debt data in this fixture -- not
-    # what this test is checking) and the dividend sanity-band fallback described above.
-    assert len(d.assumptions) == 2
+    # Three flagged assumptions now: interest_rate (no debt data in this fixture -- not
+    # what this test is checking), the dividend sanity-band fallback, and the follow-on
+    # disclosure that payout_ratio shares the same lookback window as the rejected rate.
+    assert len(d.assumptions) == 3
     assert any("interest_expense" in a for a in d.assumptions)
     assert any("plausible range" in a for a in d.assumptions)
+    assert any("same lookback window" in a for a in d.assumptions)
 
 
 def test_derive_drivers_dividend_growth_rejects_an_implausible_rate():
@@ -122,6 +124,7 @@ def test_derive_drivers_dividend_growth_rejects_an_implausible_rate():
     d = derive_drivers_from_history(years, base_year=2025, lookback_years=3)
     assert d.dividend_policy == "payout_ratio"  # -40%/yr is well outside the sanity band
     assert any("plausible range" in a for a in d.assumptions)
+    assert any("same lookback window" in a for a in d.assumptions)  # the follow-on disclosure
 
 
 def test_derive_drivers_dividend_growth_within_sanity_band_is_used_as_is():
