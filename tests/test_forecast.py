@@ -92,15 +92,43 @@ def test_derive_drivers_averages_ratios_across_the_lookback_window_not_just_base
     assert abs(d.inventory_days - 150.0) < 1e-6      # (100 + 150 + 200) / 3, not 200
     assert abs(d.dividend_payout_ratio - 0.40) < 1e-9  # (0.20 + 0.40 + 0.60) / 3, not 0.60
     assert abs(d.revenue_growth - 0.10) < 1e-9        # CAGR: (1210/1000)^(1/2) - 1 = 0.10 exactly
-    # Dividends grew every year in this fixture (60 -> 160 -> 300), so a real CAGR is
-    # computable -- growth_rate policy should be used as-is, no fallback.
+    # Dividends grew every year in this fixture (60 -> 160 -> 300), so a real growth
+    # rate is computable -- growth_rate policy should be used as-is, no fallback.
     assert d.dividend_policy == "growth_rate"
-    assert abs(d.dividend_growth_rate - (5 ** 0.5 - 1)) < 1e-9  # (300/60)^(1/2) - 1
+    # Median of YoY growth rates, not endpoint CAGR: 160/60-1=1.6667, 300/160-1=0.875;
+    # median of 2 values is their average = 1.270833...
+    assert abs(d.dividend_growth_rate - 1.2708333333333333) < 1e-9
     # Full 3-year window was available for every ratio actually present in the fixture --
     # the one flagged assumption is interest_rate, because this fixture has no debt data
     # at all (not what this test is checking), not a lookback-window shortfall.
     assert len(d.assumptions) == 1
     assert "interest_expense" in d.assumptions[0]
+
+
+def test_derive_drivers_dividend_growth_uses_median_not_endpoint_cagr():
+    """Mirrors the real Costco bug: a lumpy special dividend landing at one END of the
+    lookback window makes an endpoint CAGR wildly misleading, even though the
+    underlying trend in every OTHER year is a steady, ordinary increase. Constructed so
+    the endpoint CAGR would show a sharp decline while the actual multi-year trend is
+    mildly positive -- the same shape as Costco's real -21.5% CAGR sitting on top of a
+    dividend that has actually grown steadily for years."""
+    years = {
+        2021: {"revenue": 1000.0, "dividends_paid": 300.0},  # a special dividend year
+        2022: {"revenue": 1000.0, "dividends_paid": 110.0},  # back to the regular dividend
+        2023: {"revenue": 1000.0, "dividends_paid": 115.0},
+        2024: {"revenue": 1000.0, "dividends_paid": 120.0},
+        2025: {"revenue": 1000.0, "dividends_paid": 126.0},
+    }
+    d = derive_drivers_from_history(years, base_year=2025, lookback_years=5)
+
+    endpoint_cagr_would_have_been = (126.0 / 300.0) ** (1 / 4) - 1
+    assert endpoint_cagr_would_have_been < -0.15  # confirms the fixture reproduces the real distortion
+
+    # Median of the 4 YoY rates (-63.3%, +4.55%, +4.35%, +5.0%) is the average of the
+    # middle two ordinary years: (1/22 + 1/23) / 2.
+    assert abs(d.dividend_growth_rate - (1 / 22 + 1 / 23) / 2) < 1e-9
+    assert d.dividend_growth_rate > 0.03  # correctly reads as a mild, real increase...
+    assert d.dividend_growth_rate < 0.06  # ...not the ~-20% an endpoint CAGR would have shown
 
 
 def test_derive_drivers_dividend_policy_can_be_explicitly_set_to_payout_ratio():

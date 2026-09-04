@@ -21,6 +21,7 @@ stated assumption, not a hidden one.
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
 
 from .statements import AnnualTable, CheckResult
@@ -213,7 +214,9 @@ def derive_drivers_from_history(
         return y[num_key] / denom if denom else None
 
     def cagr(get_value, label):
-        """Shared CAGR logic for revenue and (optionally) dividends. Returns
+        """Endpoint-to-endpoint CAGR. Used for revenue_growth -- appropriate there
+        because revenue is rarely lumpy in a way that makes one endpoint unrepresentative.
+        NOT used for dividends; see median_yoy_growth below. Returns
         (rate, assumption_note_or_None)."""
         first_year, last_year = years[0], years[-1]
         v_first, v_last = get_value(table[first_year]), get_value(table[last_year])
@@ -222,6 +225,31 @@ def derive_drivers_from_history(
                          f"starting value) -- assumed 0.0")
         periods = len(years) - 1
         return (v_last / v_first) ** (1 / periods) - 1, None
+
+    def median_yoy_growth(get_value, label):
+        """Median of year-over-year growth rates, not an endpoint CAGR. A two-point CAGR
+        is entirely determined by whichever two years happen to be first and last --
+        confirmed as a real problem against live Costco data: dividend_growth_rate came
+        back -21.5%/year, which compounded over a 5-year forecast implies Costco's
+        dividend shrinking to ~30% of its current level, nothing like their actual,
+        steadily-growing regular dividend. The distortion is a special dividend (a real,
+        lumpy, one-off payment on top of the regular quarterly dividend) landing near one
+        end of the lookback window. Using the median across all adjacent-year growth
+        rates instead means a single lumpy year can only ever be one data point among
+        several -- it can't single-handedly set the result the way an endpoint can.
+        Returns (rate, assumption_note_or_None)."""
+        pairs = []
+        for prev_yr, yr in itertools.pairwise(years):
+            v_prev, v_cur = get_value(table[prev_yr]), get_value(table[yr])
+            if v_prev is not None and v_cur is not None and v_prev > 0:
+                pairs.append(v_cur / v_prev - 1)
+        if not pairs:
+            return 0.0, (f"Cannot compute a {label} growth rate (need 2+ consecutive years "
+                         f"with a positive starting value) -- assumed 0.0")
+        pairs.sort()
+        mid = len(pairs) // 2
+        median = pairs[mid] if len(pairs) % 2 else (pairs[mid - 1] + pairs[mid]) / 2
+        return median, None
 
     def gross_profit_for_year(y):
         if "gross_profit" in y:
@@ -247,7 +275,7 @@ def derive_drivers_from_history(
     if growth_note:
         assumptions.append(growth_note)
 
-    dividend_growth_rate, div_growth_note = cagr(lambda y: y.get("dividends_paid"), "dividend")
+    dividend_growth_rate, div_growth_note = median_yoy_growth(lambda y: y.get("dividends_paid"), "dividend")
     if div_growth_note and dividend_policy == "growth_rate":
         # Can't extrapolate a trend that doesn't exist yet (e.g. a company with no
         # dividend, or one just initiated inside the lookback window) -- fall back to
