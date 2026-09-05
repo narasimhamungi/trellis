@@ -7,13 +7,19 @@ day-based working capital, capex/D&A, a debt schedule). Cash is then the plug:
     Cash = (Total Liabilities + Total Equity) - Non-cash Assets
 
 This makes the balance sheet balance by construction -- it cannot fail the hard
-check from statements.py, because it's defined to satisfy it. That's a feature,
-not a bypass, IF a second thing also holds: the plugged cash change should equal
-what the cash flow statement independently implies (CFO + CFI + CFF). If drivers
-are internally consistent, both routes to "how much did cash move" agree. If they
-don't -- e.g. debt was cut on the balance sheet but the repayment wasn't reflected
-in financing cash flow -- the two cash figures diverge, and reconcile_forecast_year
-below reports that as a soft-check failure rather than silently keeping the plug.
+check from statements.py, because it's defined to satisfy it. reconcile_forecast_year
+below is the corresponding invariant for the cash-flow side: it checks that the
+plugged cash change equals what CFO+CFI+CFF independently implies. Both checks are
+IMPLEMENTATION INVARIANTS, not economic validation -- confirmed by direct testing:
+they cannot fail on the model asserting an economically impossible state (unbounded
+negative cash, an unfundable distribution), only on an actual arithmetic bug in this
+module (which is exactly what caught the equity-roll error and the sign-cancellation
+in an earlier version of this file). A forecast printing "every year reconciled" means
+the code has no internal contradiction -- it does NOT mean the company can actually
+fund what's being modeled. See the feasibility layer (cash floor + revolver + the
+`insolvent` flag in project_year's output) for the check that actually can fail on
+economics, and treat the two kinds of check as answering different questions.
+
 "other assets" and "other liabilities" (whatever this schema didn't capture as a
 named line item) are carried flat from the last historical year -- an explicit,
 stated assumption, not a hidden one.
@@ -99,6 +105,14 @@ class Drivers:
     # from `lookback_years` and `base_year` independently can silently drift out of sync
     # if the default changes, which is exactly what happened once already in this
     # project's own example script before this field existed.
+    revolver_limit: float | None = None  # None = unbounded revolver (the honest default
+    # absent real credit-facility data). When a real limit is known (most 10-Ks disclose
+    # one in the debt footnote), supply it via the same sourced-override mechanism used
+    # for interest_rate -- a stated, cited capacity is far better than either an
+    # unbounded assumption or an invented number. See project_year's `insolvent` flag:
+    # with no limit, cash can always be topped up to the floor and nothing can ever be
+    # flagged infeasible by construction, which is a real, disclosed limitation of the
+    # default, not a claim that every company can always fund itself.
     assumptions: tuple[str, ...] = ()        # last-resort defaults: no data, no override
     overrides_applied: tuple[str, ...] = ()  # analyst-sourced, cited values used in place
     # of auto-derivation -- for a driver that genuinely can't be pulled from tagged filing
@@ -189,7 +203,7 @@ def derive_drivers_from_history(
                 out.append(v)
         return out
 
-    def avg(vals, driver_name):
+    def avg(vals, driver_name, method="mean"):
         """No silent zeros: an empty list means nothing in the lookback window could
         produce this driver at all, and 0.0 is very rarely the economically correct
         stand-in (a 0% gross margin, 0-day receivables, etc. are all almost always
@@ -198,7 +212,12 @@ def derive_drivers_from_history(
         five years of large losses that still printed 'reconciled cleanly' -- internal
         self-consistency was never the problem, an unflagged bad input was. Every
         averaged driver goes through this now, not just the ones that have already
-        caused a visible failure."""
+        caused a visible failure.
+
+        method='median' is used for dividend_payout_ratio specifically -- a mean is not
+        robust to the same special-dividend contamination that dividend_growth_rate
+        already needed a median for (both are computed over the identical lookback
+        window, so a special-dividend year distorts both drivers, not just one)."""
         if not vals:
             assumptions.append(
                 f"{driver_name}: no data available in any lookback year -- assumed 0.0. "
@@ -207,6 +226,11 @@ def derive_drivers_from_history(
                 f"before trusting any forecast built on this driver."
             )
             return 0.0
+        if method == "median":
+            s = sorted(vals)
+            n = len(s)
+            mid = n // 2
+            return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
         return sum(vals) / len(vals)
 
     def ratio(y, num_key, denom_key=None, use_cogs=False):
@@ -271,7 +295,13 @@ def derive_drivers_from_history(
     capex_pcts = yearly(lambda y: ratio(y, "capex", "revenue"))
     da_pcts = yearly(lambda y: ratio(y, "depreciation_amortization", "revenue"))
     payout_ratios = yearly(lambda y: y.get("dividends_paid", 0.0) / y["net_income"]
-                            if y.get("net_income") else None)
+                            if y.get("net_income", 0.0) > 0 else None)
+    # Excludes loss years entirely rather than letting a negative ratio (a maintained
+    # dividend against negative net income) pull the average down or negative -- real
+    # bug, confirmed by tracing the code: a sufficiently negative average, applied via
+    # `max(net_income,0) * payout_ratio` to a later PROFITABLE year, produces negative
+    # projected dividends with no guard catching it. The final max(...,0.0) below is a
+    # second, defensive line against the same failure mode.
 
     revenue_growth, growth_note = cagr(lambda y: y.get("revenue"), "revenue")
     if growth_note:
@@ -378,7 +408,7 @@ def derive_drivers_from_history(
         da_pct_revenue=avg(da_pcts, "da_pct_revenue"),
         interest_rate=interest_rate,
         debt_repayment=debt_repayment,
-        dividend_payout_ratio=avg(payout_ratios, "dividend_payout_ratio"),
+        dividend_payout_ratio=max(avg(payout_ratios, "dividend_payout_ratio", method="median"), 0.0),
         dividend_growth_rate=dividend_growth_rate,
         dividend_policy=dividend_policy,
         capital_return_policy=capital_return_policy,
@@ -407,55 +437,115 @@ def project_year(prior: dict[str, float], drivers: Drivers) -> dict[str, float]:
     da = revenue * drivers.da_pct_revenue
     ppe_net = prior.get("ppe_net", 0.0) + capex - da
     long_term_debt = max(prior.get("long_term_debt", 0.0) - drivers.debt_repayment, 0.0)
+
+    # Dividend trajectory is tracked separately from the actual cash payment. Real bug,
+    # confirmed by tracing the code: under the old version, a single loss year forced
+    # dividends_paid to 0 (correctly, via the payout ceiling), but next year's
+    # growth_rate compounding read `prior["dividends_paid"]` -- now 0 -- so the dividend
+    # was permanently extinguished for the rest of the forecast. That's the opposite of
+    # the Lintner stickiness growth_rate policy exists to model: real companies resume
+    # paying (often at close to the pre-cut level) once profitable again, they don't
+    # restart from zero. `dividend_trajectory` compounds every year regardless of what
+    # was actually paid; `dividends_paid` is the capped, actual cash figure. This is a
+    # real, disclosed trade-off, not a free fix: it assumes a full snapback to the
+    # pre-cut trajectory the moment profitability resumes, which likely overstates how
+    # fast a real dividend recovers (many companies resume more conservatively and
+    # rebuild). The alternative -- resuming from the last actually-paid level -- avoids
+    # that overstatement but reintroduces the permanent-zero bug for any company with
+    # more than one loss year in a row. Bootstraps from the historical dividends_paid
+    # figure in the first forecast year, since dividend_trajectory doesn't exist yet in
+    # reported data.
+    prior_trajectory = prior.get("dividend_trajectory", prior.get("dividends_paid", 0.0))
     if drivers.dividend_policy == "growth_rate":
-        dividends_paid = max(prior.get("dividends_paid", 0.0) * (1 + drivers.dividend_growth_rate), 0.0)
+        dividend_trajectory = max(prior_trajectory * (1 + drivers.dividend_growth_rate), 0.0)
     else:
-        dividends_paid = max(net_income, 0.0) * drivers.dividend_payout_ratio
+        dividend_trajectory = max(net_income, 0.0) * drivers.dividend_payout_ratio
     payout_ceiling = max(net_income, 0.0) * drivers.max_payout_ratio
-    dividend_capped = dividends_paid > payout_ceiling
-    dividends_paid = min(dividends_paid, payout_ceiling)
-    equity_before_buybacks = prior.get("stockholders_equity", 0.0) + net_income - dividends_paid
+    dividend_capped = dividend_trajectory > payout_ceiling
+    dividends_paid = min(dividend_trajectory, payout_ceiling)
+    equity_before_capital_actions = prior.get("stockholders_equity", 0.0) + net_income - dividends_paid
 
     # "other" buckets this schema doesn't name -- carried flat, explicitly, from the
-    # last actual year rather than silently dropped to zero.
+    # last actual year rather than silently dropped to zero. (Named other_liabilities,
+    # not other_liabilities_and_equity: an earlier version of this line included
+    # +prior_equity -prior_equity terms that cancel exactly, so despite the name no
+    # equity was ever actually in this number -- the arithmetic was always right, the
+    # name was lying about what it computed. Fixed here, not just relabeled.)
     other_assets = prior.get("total_assets", 0.0) - prior.get("cash_and_equivalents", 0.0) \
         - prior.get("accounts_receivable", 0.0) - prior.get("inventory", 0.0) \
         - prior.get("ppe_net", 0.0)
-    other_liabilities_and_equity = prior.get("total_liabilities", 0.0) + prior.get("stockholders_equity", 0.0) \
-        - prior.get("accounts_payable", 0.0) - prior.get("long_term_debt", 0.0) \
-        - prior.get("stockholders_equity", 0.0)
+    prior_revolver = prior.get("revolver_balance", 0.0)
+    other_liabilities = prior.get("total_liabilities", 0.0) \
+        - prior.get("accounts_payable", 0.0) - prior.get("long_term_debt", 0.0) - prior_revolver
+    # revolver_balance excluded here and added back as its own explicit term below --
+    # same treatment as AP and long-term debt, so it can't get silently folded into the
+    # generic flat-carry over multiple years (hand-verified: without this exclusion, the
+    # carry-forward still nets out correctly by coincidence for one year, but the
+    # explicit revolver_balance tracking and the implicit amount inside other_liabilities
+    # diverge from year two onward once a paydown or second draw happens).
 
     non_cash_assets = ar + inventory + ppe_net + other_assets
     total_liabilities_and_equity_before = (
-        ap + long_term_debt + other_liabilities_and_equity + equity_before_buybacks
+        ap + long_term_debt + prior_revolver + other_liabilities + equity_before_capital_actions
     )
-    cash_before_buybacks = total_liabilities_and_equity_before - non_cash_assets  # the plug
+    cash_before_capital_actions = total_liabilities_and_equity_before - non_cash_assets  # the plug
 
-    # --- Capital return: floor-and-sweep buybacks ---
-    # Cash and equity drop by the identical dollar amount, so the balance-sheet identity
-    # proven for the plug above (total_liabilities_and_equity == cash + non_cash_assets)
-    # is preserved automatically -- subtracting the same number from both sides of an
-    # equality that already held keeps it holding. Retiring through retained earnings,
-    # not treasury stock: matches how Nike (and, per the registry, likely other heavy
-    # repurchasers) actually books it, and is the simplest approach that still closes
-    # the historical retained_earnings_rollforward gap going forward.
-    if drivers.capital_return_policy == "sweep_to_buybacks":
-        cash_floor = revenue * drivers.cash_floor_pct_revenue
-        buybacks = max(cash_before_buybacks - cash_floor, 0.0)
+    # --- Feasibility layer: two-sided plug ---
+    # The plug above can assert any cash figure, including deeply negative -- confirmed
+    # by direct testing: a distressed driver set produces five straight years of
+    # increasingly negative cash, every year passing reconcile_forecast_year, because
+    # that check only tests internal arithmetic consistency, never whether the company
+    # can actually fund itself (see this module's docstring). A revolver is the standard
+    # professional-model answer: draw when cash would fall below the floor, pay down
+    # when there's excess, buy back stock only with whatever's left after that. Without
+    # a real disclosed credit-facility size (revolver_limit defaults to None), the
+    # revolver is unbounded -- cash can always be topped up to the floor, which is an
+    # honest, disclosed limitation of the default, not a claim every company can always
+    # fund itself. `insolvent` only becomes possible to observe once a real, cited
+    # revolver_limit is supplied via the same override mechanism used for interest_rate.
+    cash_floor = revenue * drivers.cash_floor_pct_revenue
+
+    if cash_before_capital_actions < cash_floor:
+        needed_draw = cash_floor - cash_before_capital_actions
+        if drivers.revolver_limit is not None:
+            available_capacity = max(drivers.revolver_limit - prior_revolver, 0.0)
+            revolver_draw = min(needed_draw, available_capacity)
+        else:
+            revolver_draw = needed_draw
+        revolver_paydown = 0.0
+        buybacks = 0.0  # can't return capital to shareholders while drawing on credit
     else:
-        buybacks = 0.0
+        available_excess = cash_before_capital_actions - cash_floor
+        revolver_paydown = min(prior_revolver, available_excess)  # debt service isn't a
+        # capital-return decision -- pay it down whenever there's cash, regardless of
+        # capital_return_policy, before considering buybacks with what's left.
+        remaining_excess = available_excess - revolver_paydown
+        revolver_draw = 0.0
+        buybacks = remaining_excess if drivers.capital_return_policy == "sweep_to_buybacks" else 0.0
 
-    cash_and_equivalents = cash_before_buybacks - buybacks
-    stockholders_equity = equity_before_buybacks - buybacks
-    total_liabilities_and_equity = total_liabilities_and_equity_before - buybacks
+    revolver_balance = prior_revolver + revolver_draw - revolver_paydown
+    net_financing_adjustment = revolver_draw - revolver_paydown - buybacks
+
+    # Cash and equity move by the identical net amount, so the balance-sheet identity
+    # proven for the plug above (total_liabilities_and_equity == cash + non_cash_assets)
+    # is preserved automatically -- adding the same number to both sides of an equality
+    # that already held keeps it holding, the same trick already proven for buybacks
+    # alone, extended here to also cover the revolver draw/paydown.
+    cash_and_equivalents = cash_before_capital_actions + net_financing_adjustment
+    stockholders_equity = equity_before_capital_actions - buybacks  # revolver flows are
+    # debt, not equity -- they don't touch stockholders_equity, only cash and liabilities.
+    total_liabilities_and_equity = total_liabilities_and_equity_before + revolver_draw \
+        - revolver_paydown - buybacks
     total_assets = cash_and_equivalents + non_cash_assets
     total_liabilities = total_liabilities_and_equity - stockholders_equity
     retained_earnings = prior.get("retained_earnings", 0.0) + net_income - dividends_paid - buybacks
+    insolvent = cash_and_equivalents < cash_floor - 1.0  # only True if even the full
+    # revolver_limit couldn't reach the floor; always False when revolver_limit is None
 
     cfo = net_income + da - (ar - prior.get("accounts_receivable", 0.0)) \
         - (inventory - prior.get("inventory", 0.0)) + (ap - prior.get("accounts_payable", 0.0))
     cfi = -capex
-    cff = -drivers.debt_repayment - dividends_paid - buybacks
+    cff = -drivers.debt_repayment - dividends_paid - buybacks + revolver_draw - revolver_paydown
 
     return {
         "revenue": revenue, "cost_of_revenue": cogs, "gross_profit": gross_profit,
@@ -466,7 +556,10 @@ def project_year(prior: dict[str, float], drivers: Drivers) -> dict[str, float]:
         "accounts_payable": ap, "long_term_debt": long_term_debt,
         "total_liabilities": total_liabilities, "stockholders_equity": stockholders_equity,
         "retained_earnings": retained_earnings, "dividends_paid": dividends_paid,
-        "dividend_capped": dividend_capped, "buybacks": buybacks,
+        "dividend_trajectory": dividend_trajectory, "dividend_capped": dividend_capped,
+        "buybacks": buybacks, "revolver_balance": revolver_balance,
+        "revolver_draw": revolver_draw, "revolver_paydown": revolver_paydown,
+        "insolvent": insolvent,
         "capex": capex, "depreciation_amortization": da,
         "cfo": cfo, "cfi": cfi, "cff": cff,
     }
@@ -485,9 +578,15 @@ def run_forecast(table: AnnualTable, base_year: int, drivers: Drivers, years: in
 def reconcile_forecast_year(year: int, year_data: dict[str, float],
                              prior_cash: float, tolerance: float = 1.0) -> CheckResult:
     """Does the plugged cash change match what CFO+CFI+CFF independently implies?
-    Because project_year derives cash as a pure plug, this is the check that actually
-    tests whether the driver set is self-consistent -- balance_sheet_balances alone
-    would pass trivially here even on garbage drivers."""
+    This is an IMPLEMENTATION INVARIANT, not economic validation -- confirmed by direct
+    testing that it cannot fail on an economically impossible forecast (unbounded
+    negative cash, an unfundable dividend), only on an actual arithmetic bug in
+    project_year, because CFO/CFI/CFF are built from the identical roll-forwards that
+    produce the plug. That IS still valuable -- it caught a real equity-roll algebra bug
+    during this engine's own development -- but a passing result means 'the code has no
+    internal contradiction,' not 'this company can fund what's being modeled.' See the
+    `insolvent` flag on project_year's output for the check that can actually fail on
+    economics."""
     implied_change = year_data["cfo"] + year_data["cfi"] + year_data["cff"]
     plugged_change = year_data["cash_and_equivalents"] - prior_cash
     diff = plugged_change - implied_change

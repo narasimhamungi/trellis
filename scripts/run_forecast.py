@@ -130,6 +130,7 @@ def main():
     print(f"{'Year':<8}{'Revenue':>12}{'NetIncome':>12}{'Buybacks':>11}{'Cash':>12}{'TotalAssets':>14}")
     prior_cash = table[base_year]["cash_and_equivalents"]
     any_failed = False
+    any_insolvent = False
     for year in sorted(forecast):
         y = forecast[year]
         print(f"FY{year:<6}{y['revenue'] / 1e6:>12,.0f}{y['net_income'] / 1e6:>12,.0f}"
@@ -142,10 +143,24 @@ def main():
         if y.get("dividend_capped"):
             print(f"  note: dividend payout ceiling ({drivers.max_payout_ratio:.0%} of net "
                   f"income) bound in FY{year} -- growth_rate trajectory would have exceeded it")
+        if y.get("revolver_draw", 0.0) > 0:
+            print(f"  note: drew {y['revolver_draw'] / 1e6:,.0f}M on the revolver in FY{year} "
+                  f"to hold cash at the floor (balance now {y['revolver_balance'] / 1e6:,.0f}M)")
+        if y.get("insolvent"):
+            any_insolvent = True
+            print(f"  !! FY{year}: cash floor NOT reachable even with the full revolver_limit "
+                  f"-- this scenario is not fundable as modeled, not just tight")
         prior_cash = y["cash_and_equivalents"]
 
-    print("\n" + ("Every forecast year reconciled cleanly." if not any_failed
-                   else "At least one year failed to reconcile -- see !! lines above."))
+    print()
+    print("Every forecast year passed its internal arithmetic check."
+          if not any_failed else "At least one year failed to reconcile -- see !! lines above.")
+    print("This confirms the code has no internal contradiction. It does NOT confirm the "
+          "forecast is economically realistic -- see any insolvency or dividend-cap notes "
+          "above for the checks that actually can fail on economics.")
+    if any_insolvent:
+        print("At least one year is flagged insolvent under the stated revolver_limit -- "
+              "treat this scenario's later years as not meaningfully fundable, not merely tight.")
 
 
 if __name__ == "__main__":

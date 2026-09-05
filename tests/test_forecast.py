@@ -141,6 +141,59 @@ def test_derive_drivers_dividend_growth_within_sanity_band_is_used_as_is():
     assert not any("plausible range" in a for a in d.assumptions)
 
 
+def test_derive_drivers_payout_ratio_uses_median_not_mean():
+    """The V6/F08 fix applied to dividend_payout_ratio directly, not just
+    dividend_growth_rate: both are computed over the identical lookback window, so a
+    special-dividend year distorts both drivers, not just one. Two of five years here
+    have an elevated ratio (mirroring Costco's real special-dividend years); a mean
+    gets dragged to ~101%, a median lands on the actual ordinary-year level."""
+    years = {
+        2021: {"net_income": 100.0, "dividends_paid": 300.0},  # ratio 3.00 (special)
+        2022: {"net_income": 100.0, "dividends_paid": 25.0},   # ratio 0.25
+        2023: {"net_income": 100.0, "dividends_paid": 28.0},   # ratio 0.28
+        2024: {"net_income": 100.0, "dividends_paid": 125.0},  # ratio 1.25 (special)
+        2025: {"net_income": 100.0, "dividends_paid": 29.0},   # ratio 0.29
+    }
+    d = derive_drivers_from_history(years, base_year=2025, lookback_years=5)
+    naive_mean = (3.00 + 0.25 + 0.28 + 1.25 + 0.29) / 5
+    assert naive_mean > 1.0  # confirms the fixture reproduces the real distortion
+    assert abs(d.dividend_payout_ratio - 0.29) < 1e-9  # median of the 5 sorted ratios
+
+
+def test_derive_drivers_payout_ratio_excludes_loss_years_not_just_clamps_them():
+    """The F09 fix: a maintained dividend against a LOSS produces a negative ratio
+    (e.g. 50/-100 = -0.5) that, averaged in with ordinary years, can drag the result
+    negative -- confirmed by tracing the code that a sufficiently negative average,
+    applied to a later PROFITABLE year via max(net_income,0)*ratio, produces negative
+    projected dividends with nothing catching it. Excluding the loss year entirely
+    (rather than clamping its ratio to 0) is the correct fix: a payout ratio computed
+    against negative earnings isn't a diluted signal, it's not a meaningful observation
+    at all."""
+    years = {
+        2023: {"net_income": -100.0, "dividends_paid": 50.0},  # excluded: net_income <= 0
+        2024: {"net_income": 100.0, "dividends_paid": 25.0},   # ratio 0.25
+        2025: {"net_income": 100.0, "dividends_paid": 27.0},   # ratio 0.27
+    }
+    d = derive_drivers_from_history(years, base_year=2025, lookback_years=3)
+    assert abs(d.dividend_payout_ratio - 0.26) < 1e-9  # median of [0.25, 0.27], loss year excluded
+    assert d.dividend_payout_ratio > 0  # nowhere near the ~0.007 a contaminated mean would give
+
+
+def test_derive_drivers_payout_ratio_defensive_clamp_never_negative():
+    """Belt-and-suspenders: even in a contrived case where the median of the surviving
+    (positive-net-income) ratios is itself negative -- possible if dividends_paid is
+    negative in the raw data, an edge case the exclusion above doesn't catch -- the
+    final driver must never be negative."""
+    years = {
+        2023: {"net_income": 100.0, "dividends_paid": -10.0},  # ratio -0.10
+        2024: {"net_income": 100.0, "dividends_paid": -20.0},  # ratio -0.20
+        2025: {"net_income": 100.0, "dividends_paid": 50.0},   # ratio 0.50
+    }
+    d = derive_drivers_from_history(years, base_year=2025, lookback_years=3)
+    # Median of [-0.20, -0.10, 0.50] is -0.10 -- the clamp must catch this.
+    assert d.dividend_payout_ratio == 0.0
+
+
 def test_derive_drivers_dividend_growth_uses_median_not_endpoint_cagr():
     """Mirrors the real Costco bug: a lumpy special dividend landing at one END of the
     lookback window makes an endpoint CAGR wildly misleading, even though the
@@ -339,28 +392,41 @@ def test_project_year_ceiling_applies_to_payout_ratio_policy_too():
     assert abs(y["dividends_paid"] - y["net_income"]) < 1e-6  # capped at 100%, not 150%
 
 
-def test_run_forecast_capped_dividend_becomes_the_base_for_next_years_growth():
-    """No shadow trajectory: once the ceiling binds, the following year's growth-rate
-    compounding starts from the capped figure actually paid, not the uncapped one."""
-    drivers = Drivers(
-        revenue_growth=0.0, gross_margin=0.40, sga_pct_revenue=0.20, tax_rate=0.20,
-        ar_days=30.0, inventory_days=100.0, ap_days=40.0, capex_pct_revenue=0.05,
-        da_pct_revenue=0.04, interest_rate=0.0, debt_repayment=0.0,
-        dividend_payout_ratio=0.20, dividend_growth_rate=1.00,
-        dividend_policy="growth_rate", max_payout_ratio=1.0,
-    )
-    table = {2026: {"revenue": 1000.0, "net_income": 176.0, "dividends_paid": 150.0,
-                    "long_term_debt": 0.0, "ppe_net": 500.0, "total_assets": 900.0,
-                    "total_liabilities": 400.0, "stockholders_equity": 500.0,
-                    "cash_and_equivalents": 160.0, "accounts_receivable": 80.0,
-                    "inventory": 90.0, "accounts_payable": 70.0, "retained_earnings": 300.0}}
-    forecast = run_forecast(table, base_year=2026, drivers=drivers, years=2)
+def test_dividend_trajectory_recovers_after_a_loss_year_instead_of_staying_zero_forever():
+    """The real F03 fix: a single loss year must not permanently extinguish the
+    dividend under growth_rate policy. Confirmed as a real bug by tracing the old code:
+    the payout ceiling correctly zeroed dividends_paid IN the loss year, but the
+    following year's growth compounding read prior['dividends_paid'] -- now 0 -- so
+    0*(1+g) stayed 0 forever, the opposite of the Lintner stickiness the policy exists
+    to model. Uses two different hand-picked driver sets across two direct project_year
+    calls (not run_forecast) specifically so the loss and the recovery are each
+    independently verifiable, rather than relying on one driver set to produce both."""
+    year0 = {"revenue": 1000.0, "dividends_paid": 100.0, "long_term_debt": 0.0,
+             "ppe_net": 500.0, "total_assets": 900.0, "total_liabilities": 400.0,
+             "stockholders_equity": 500.0, "cash_and_equivalents": 200.0,
+             "accounts_receivable": 80.0, "inventory": 90.0, "accounts_payable": 70.0,
+             "retained_earnings": 300.0}
+    common = {"revenue_growth": 0.0, "ar_days": 0.0, "inventory_days": 0.0, "ap_days": 0.0,
+              "capex_pct_revenue": 0.0, "da_pct_revenue": 0.0, "interest_rate": 0.0,
+              "debt_repayment": 0.0, "dividend_payout_ratio": 0.0, "dividend_growth_rate": 0.05,
+              "dividend_policy": "growth_rate", "max_payout_ratio": 1.0,
+              "capital_return_policy": "none", "cash_floor_pct_revenue": 0.0}
+    loss_drivers = Drivers(**common, gross_margin=0.10, sga_pct_revenue=0.50, tax_rate=0.20)
+    # gross_profit=100, sga=500, operating_income=-400, tax=-400*0.20=-80, NI=-320
 
-    assert forecast[2027]["dividend_capped"] is True
-    # FY2028's uncapped growth-rate trajectory starts from FY2027's actual (capped) payout,
-    # not from the 150 * 2 * 2 = 600 an uncorrected compounding would imply.
-    naive_uncapped_year2 = 150.0 * 2.0 * 2.0
-    assert forecast[2028]["dividends_paid"] < naive_uncapped_year2
+    year1 = project_year(year0, loss_drivers)
+    assert year1["net_income"] < 0
+    assert year1["dividends_paid"] == 0.0        # correctly zeroed by the payout ceiling
+    assert year1["dividend_capped"] is True
+    assert abs(year1["dividend_trajectory"] - 105.0) < 1e-6  # 100 * 1.05 -- kept alive uncapped
+
+    normal_drivers = Drivers(**common, gross_margin=0.40, sga_pct_revenue=0.20, tax_rate=0.20)
+    # gross_profit=400, sga=200, operating_income=200, tax=40, NI=160
+    year2 = project_year(year1, normal_drivers)
+    assert year2["net_income"] > 0
+    assert abs(year2["dividend_trajectory"] - 110.25) < 1e-6  # 105 * 1.05, not 0 * 1.05
+    assert abs(year2["dividends_paid"] - 110.25) < 1e-6       # resumed, not stuck at 0
+    assert year2["dividend_capped"] is False                  # 110.25 < ceiling of 160
 
 
 # --- Capital-return module (floor-and-sweep buybacks) ---
@@ -407,13 +473,59 @@ def test_project_year_sweep_preserves_self_consistency():
     assert result.passed, result.detail  # buybacks are in CFF; plug and CF-implied change still agree
 
 
-def test_project_year_no_buyback_when_cash_is_already_below_the_floor():
+def test_project_year_draws_on_an_unbounded_revolver_to_reach_the_floor():
+    """The real V2/F02 fix: without this, cash below the floor (or negative) was a
+    valid, unflagged output -- confirmed by direct testing that a distressed driver set
+    could produce five straight years of increasingly negative cash, every year still
+    passing reconcile_forecast_year (that check only tests arithmetic consistency, never
+    economic feasibility). Default revolver_limit=None means unbounded: cash always gets
+    topped up to the floor, an honest disclosed limitation (no company can ACTUALLY
+    borrow without limit), not a claim of universal solvency -- see the next test for
+    the bounded case."""
     high_floor_drivers = Drivers(
         **{**_SWEEP_DRIVERS.__dict__, "cash_floor_pct_revenue": 0.80},  # floor = 800 > 740 available
     )
     y = project_year(_SWEEP_PRIOR, high_floor_drivers)
-    assert y["buybacks"] == 0.0
-    assert abs(y["cash_and_equivalents"] - 740.0) < 1e-6  # left as computed, not forced up to the floor
+    assert y["buybacks"] == 0.0  # can't return capital while drawing on credit
+    assert abs(y["revolver_draw"] - 60.0) < 1e-6           # 800 - 740
+    assert abs(y["revolver_balance"] - 60.0) < 1e-6
+    assert abs(y["cash_and_equivalents"] - 800.0) < 1e-6   # topped up to the floor exactly
+    assert y["insolvent"] is False                          # fully funded, just via debt
+    assert abs(y["total_assets"] - (y["total_liabilities"] + y["stockholders_equity"])) < 1e-6
+
+
+def test_project_year_revolver_limit_caps_the_draw_and_flags_insolvent():
+    """Once a real, cited revolver_limit is supplied, a shortfall the facility can't
+    cover becomes genuinely observable -- the check the report specifically asked for.
+    Same fixture as above, but capacity (30) is less than the shortfall (60)."""
+    limited_drivers = Drivers(
+        **{**_SWEEP_DRIVERS.__dict__, "cash_floor_pct_revenue": 0.80, "revolver_limit": 30.0},
+    )
+    y = project_year(_SWEEP_PRIOR, limited_drivers)
+    assert abs(y["revolver_draw"] - 30.0) < 1e-6           # capped at the limit, not the full 60 needed
+    assert abs(y["cash_and_equivalents"] - 770.0) < 1e-6   # 740 + 30 -- short of the 800 floor
+    assert y["insolvent"] is True
+    # Still balances -- insolvency is an economic signal, not an arithmetic failure;
+    # the balance sheet and self-consistency checks must still both pass even here.
+    assert abs(y["total_assets"] - (y["total_liabilities"] + y["stockholders_equity"])) < 1e-6
+    result = reconcile_forecast_year(2027, y, prior_cash=_SWEEP_PRIOR["cash_and_equivalents"])
+    assert result.passed, result.detail
+
+
+def test_project_year_revolver_paydown_happens_before_buybacks():
+    """The 'two-sided' behavior: debt service isn't a capital-return decision, so an
+    existing revolver balance gets paid down first, and only what's left after that
+    gets swept to buybacks."""
+    prior_with_revolver = {**_SWEEP_PRIOR, "total_liabilities": 100.0, "revolver_balance": 100.0}
+    # total_liabilities=100 here IS entirely the revolver (other_liabilities computes to
+    # 100 - 0(AP) - 0(LTdebt) - 100(revolver) = 0) -- an internally consistent fixture,
+    # not an arbitrary pairing of numbers.
+    y = project_year(prior_with_revolver, _SWEEP_DRIVERS)  # default floor 0.30 -> 300
+    assert abs(y["revolver_paydown"] - 100.0) < 1e-6   # fully paid off
+    assert y["revolver_balance"] == 0.0
+    assert abs(y["buybacks"] - 340.0) < 1e-6            # 740 - 300(floor) - 100(paydown)
+    assert abs(y["cash_and_equivalents"] - 300.0) < 1e-6  # lands exactly at the floor
+    assert abs(y["total_assets"] - (y["total_liabilities"] + y["stockholders_equity"])) < 1e-6
 
 
 def test_project_year_no_buyback_when_policy_is_none():
