@@ -65,6 +65,19 @@ REGISTRY: dict[int, CompanyProfile] = {
     1018724: CompanyProfile(
         cik=1018724, name="Amazon.com, Inc.", ticker="AMZN",
         fiscal_year_end="December 31",
+        overrides={
+            "revolver_limit": (20_000_000_000.0, (
+                "Amazon 10-Q filed 10/31/2025 (period ended Sept 30, 2025): $15.0B "
+                "unsecured revolving credit facility (the 'Credit Agreement', matures "
+                "Nov 2028) + $5.0B unsecured 364-day revolving facility (the "
+                "'Short-Term Credit Agreement') = $20.0B committed revolving capacity. "
+                "Deliberately excludes the $30.0B commercial paper program (increased "
+                "from $20.0B in April 2025) -- CP is market-access dependent, not a "
+                "committed bank facility, so counting it would overstate guaranteed "
+                "liquidity. No borrowings were outstanding under either revolver as of "
+                "the filing date; this is undrawn committed capacity, not a current "
+                "balance.")),
+        },
         notes="Pays no dividend. Exercises the growth_rate-CAGR-undefined -> "
               "payout_ratio-fallback path, and payout_ratio itself should come back "
               "0.0 -- a real test that the pipeline handles 'no dividend' as a valid "
@@ -77,8 +90,9 @@ REGISTRY: dict[int, CompanyProfile] = {
               "PaymentsToAcquirePropertyPlantAndEquipment (through ~2016) to "
               "PaymentsToAcquireProductiveAssets since -- both now in schema.py's "
               "fallback chain. Massive recent capex (~$132B FY2025) reflects real "
-              "AI/data-center buildout, not a data error. Not yet researched for "
-              "override candidates.",
+              "AI/data-center buildout, not a data error. revolver_limit is now sourced "
+              "(see overrides above) -- other potential overrides (a real cost-of-debt "
+              "figure, since interest_rate is still auto-derived here) not yet researched.",
     ),
     320193: CompanyProfile(
         cik=320193, name="Apple Inc.", ticker="AAPL", fiscal_year_end="~Sept (Sat nearest Sept 30)",

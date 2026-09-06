@@ -375,6 +375,10 @@ def derive_drivers_from_history(
     if debt_repayment_source:
         overrides_applied.append(f"debt_repayment = {debt_repayment:,.0f} -- {debt_repayment_source}")
 
+    revolver_limit, revolver_limit_source = overrides.get("revolver_limit", (None, None))
+    if revolver_limit_source:
+        overrides_applied.append(f"revolver_limit = {revolver_limit:,.0f} -- {revolver_limit_source}")
+
     if capital_return_policy is None:
         has_buybacks = any(y.get("buybacks", 0.0) > 0 for y in (table[yr] for yr in years))
         capital_return_policy = "sweep_to_buybacks" if has_buybacks else "none"
@@ -414,6 +418,7 @@ def derive_drivers_from_history(
         capital_return_policy=capital_return_policy,
         cash_floor_pct_revenue=cash_floor_pct_revenue,
         years_used=tuple(years),
+        revolver_limit=revolver_limit,
         assumptions=tuple(assumptions),
         overrides_applied=tuple(overrides_applied),
     )

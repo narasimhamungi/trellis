@@ -278,6 +278,24 @@ def test_derive_drivers_applies_a_sourced_override_and_records_it_distinctly_fro
     assert not any("interest_expense" in a for a in d.assumptions)  # overridden, not assumed
 
 
+def test_derive_drivers_applies_a_revolver_limit_override():
+    """Real gap found and fixed before it shipped: revolver_limit was defined on Drivers
+    and used by project_year, but derive_drivers_from_history never extracted it from
+    overrides or passed it through -- an Amazon revolver_limit override would have been
+    silently ignored, defaulting to None (unbounded) regardless of what was supplied."""
+    d = derive_drivers_from_history(
+        TABLE, base_year=2023,
+        overrides={"revolver_limit": (20_000_000_000.0, (
+            "Amazon 10-Q Sept 2025: $15.0B Credit Agreement + "
+            "$5.0B Short-Term Credit Agreement, committed "
+            "revolving facilities only (excludes the $30.0B "
+            "commercial paper program, which is market-access "
+            "dependent, not a committed bank facility)"))},
+    )
+    assert d.revolver_limit == 20_000_000_000.0
+    assert any("revolver_limit" in o for o in d.overrides_applied)
+
+
 def test_project_year_balances_by_construction():
     d = derive_drivers_from_history(TABLE, base_year=2023)
     y2024 = project_year(YEAR_2023, d)
