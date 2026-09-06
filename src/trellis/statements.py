@@ -184,6 +184,20 @@ def fill_derived_gaps(table: AnnualTable) -> list[DerivedField]:
         if "total_liabilities" not in data and "total_assets" in data and "stockholders_equity" in data:
             data["total_liabilities"] = data["total_assets"] - data["stockholders_equity"]
             filled.append(DerivedField(year, "total_liabilities", "total_assets - stockholders_equity"))
+        if "stockholders_equity" not in data and "total_assets" in data and "total_liabilities" in data:
+            # The same identity run the other direction. Confirmed live and predicted in
+            # advance by this session's own red-team review: a filer with noncontrolling
+            # interests can tag total_liabilities directly while StockholdersEquity
+            # itself doesn't resolve (likely needs
+            # StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest
+            # instead -- a fallback tag not yet added, since the identity below closes
+            # the gap immediately without needing to confirm which alternate tag a given
+            # filer actually uses). Mutually exclusive with the rule above by
+            # construction (each requires the field the OTHER one produces to already
+            # be absent), so there's no risk of deriving one from a value the other
+            # rule just invented in the same pass.
+            data["stockholders_equity"] = data["total_assets"] - data["total_liabilities"]
+            filled.append(DerivedField(year, "stockholders_equity", "total_assets - total_liabilities"))
         if "gross_profit" not in data and "revenue" in data and "cost_of_revenue" in data:
             # Some filers (Amazon, Costco among the ones tested here) don't tag a
             # GrossProfit subtotal at all -- their income statement goes straight from

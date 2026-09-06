@@ -145,6 +145,33 @@ def test_fill_derived_gaps_computes_total_liabilities_from_identity_when_tag_abs
     assert derived[0].method == "total_assets - stockholders_equity"
 
 
+def test_fill_derived_gaps_computes_stockholders_equity_from_identity_when_tag_absent():
+    """Mirrors the real gap found against live Johnson & Johnson data: StockholdersEquity
+    itself didn't resolve (every recent year missing exactly this one field) while
+    total_liabilities tagged directly -- likely a noncontrolling-interest presentation
+    needing StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest
+    instead, predicted in advance by this session's own red-team review. The identity
+    run in reverse closes the gap immediately without needing to confirm which
+    alternate tag J&J actually uses."""
+    table = {2024: {"total_assets": 1_000.0, "total_liabilities": 600.0}}  # no stockholders_equity
+    derived = fill_derived_gaps(table)
+    assert table[2024]["stockholders_equity"] == 400.0
+    assert len(derived) == 1
+    assert derived[0].canonical_name == "stockholders_equity"
+    assert derived[0].method == "total_assets - total_liabilities"
+
+
+def test_fill_derived_gaps_liabilities_and_equity_rules_stay_mutually_exclusive():
+    """If BOTH total_liabilities and stockholders_equity are genuinely missing, neither
+    rule has anything to derive from -- both must stay missing, not one silently
+    derived from a value the other rule would have invented in the same pass."""
+    table = {2024: {"total_assets": 1_000.0}}  # neither liabilities nor equity present
+    derived = fill_derived_gaps(table)
+    assert "total_liabilities" not in table[2024]
+    assert "stockholders_equity" not in table[2024]
+    assert derived == []
+
+
 def test_fill_derived_gaps_never_overwrites_a_directly_reported_value():
     table = {2024: {"total_assets": 1_000.0, "stockholders_equity": 400.0, "total_liabilities": 555.0}}
     derived = fill_derived_gaps(table)
