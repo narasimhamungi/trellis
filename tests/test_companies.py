@@ -49,11 +49,12 @@ def test_check_industry_support_refuses_a_reit():
 def test_check_industry_support_allows_the_four_registered_companies_own_sic_codes():
     """Confirms the exclusion range doesn't accidentally catch any of the industries
     already validated this session -- footwear/apparel, warehouse retail,
-    e-commerce/cloud, consumer electronics."""
+    e-commerce/cloud, consumer electronics, pharma/healthcare."""
     assert check_industry_support(3021) is None   # Nike: rubber & plastics footwear
     assert check_industry_support(5331) is None   # Costco: variety stores
     assert check_industry_support(5961) is None   # Amazon: catalog & mail-order retail
     assert check_industry_support(3571) is None   # Apple: electronic computers
+    assert check_industry_support(2834) is None   # J&J: pharmaceutical preparations
 
 
 def test_check_industry_support_does_not_refuse_a_missing_sic():

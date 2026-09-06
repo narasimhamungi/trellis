@@ -148,6 +148,27 @@ REGISTRY: dict[int, CompanyProfile] = {
               "the interpretation generalizes, not just the code. Not yet researched "
               "for override candidates.",
     ),
+    200406: CompanyProfile(
+        cik=200406, name="Johnson & Johnson", ticker="JNJ",
+        fiscal_year_end="~Dec 31 (Sunday nearest Dec 31 -- can land on Jan 1 some years)",
+        notes="Added as the 'genuinely new industry, zero code changes' test -- "
+              "healthcare/pharma, distinct from the four consumer/tech companies "
+              "validated earlier. Ran successfully first try except for two real gaps, "
+              "both since fixed and confirmed via diagnostic: dividends_paid needed "
+              "PaymentsOfOrdinaryDividends (neither standard tag resolved at all -- "
+              "surprising for a 60+ year dividend aristocrat, but confirmed real: "
+              "$11.77B/$11.82B/$12.38B FY2023-2025); stockholders_equity needed "
+              "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest "
+              "(the plain StockholdersEquity tag returns zero entries for this filer -- "
+              "exactly the NCI presentation this session's own red-team review "
+              "predicted in advance). Fiscal year-end uses a 'nearest Sunday' "
+              "convention that can push the close to Jan 1 of the following calendar "
+              "year -- flagged as a possible edge case for the period-keying logic "
+              "(two genuinely different ~365-day annual periods could in principle "
+              "collide under the same calendar-year key), not confirmed as actively "
+              "wrong for the years checked so far. Not yet researched for override "
+              "candidates (interest_rate, revolver_limit).",
+    ),
 }
 
 
