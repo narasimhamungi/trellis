@@ -39,6 +39,15 @@ EXTRA_CANDIDATES = {
         "PaymentsForRepurchaseOfCommonStock", "PaymentsForRepurchaseOfEquity",
         "PaymentsForRepurchaseOfCommonStockAndPreferredStock",
     ],
+    "dividends_paid": [
+        "PaymentsOfDividendsCommonStock", "PaymentsOfDividends",
+        "PaymentsOfDividendsMinorityInterest", "PaymentsOfOrdinaryDividends",
+        "DividendsCommonStockCash", "DividendsPaid",
+    ],
+    "stockholders_equity": [
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+    ],
 }
 
 
