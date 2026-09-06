@@ -10,9 +10,55 @@ re-deriving any of it.
 A company with no entry here is still fully forecastable -- overrides is just an empty
 dict, and derive_drivers_from_history's own assumption-tracking handles whatever isn't
 researched yet. This registry only ever ADDS precision; it's never required.
+
+Industry scope: this schema is built around a Revenue -> COGS -> SG&A -> Operating
+Income waterfall, a balance sheet with inventory/AR/AP/PP&E, and debt that's leverage
+on top of an operating business. That fits any non-financial corporate regardless of
+sub-industry (confirmed across footwear/apparel, warehouse retail, e-commerce/cloud,
+and consumer electronics this session) -- but it does NOT fit financial companies.
+A bank's 'debt' (deposits, borrowings) is its raw material, not leverage on an
+operating business; it has no inventory or COGS; interest is revenue, not an expense.
+An insurer's balance sheet is dominated by policy reserves and investment portfolios
+that don't map to PP&E/AR/AP at all. Forcing either through this schema wouldn't error
+out -- it would silently produce numbers that look complete and mean nothing, which is
+worse than refusing. check_industry_support below gates on SIC code for exactly this
+reason: 'works for any industry' is only an honest claim once the boundary of what
+'works' means is explicit and enforced, not just hoped for.
 """
 
 from dataclasses import dataclass, field
+
+# (low, high, reason) -- SIC ranges this schema's design doesn't fit. Deliberately
+# scoped to financial services broadly (SIC 6000-6999: depository institutions,
+# credit institutions, brokers/dealers, insurance, real estate investment trusts and
+# holding companies) rather than trying to enumerate every incompatible sub-industry --
+# all of financial services shares the same fundamental mismatch (no inventory, debt
+# as raw material rather than leverage, interest as revenue rather than cost), so one
+# broad range is more honest than a narrower one that would miss cases.
+EXCLUDED_SIC_RANGES: tuple[tuple[int, int, str], ...] = (
+    (6000, 6999, (
+        "Financial services (banks, insurers, brokers/dealers, REITs, holding companies). "
+        "This schema assumes a Revenue -> COGS -> SG&A -> Operating Income waterfall and a "
+        "balance sheet built around inventory/AR/AP/PP&E -- neither exists in a recognizable "
+        "form for this industry. A bank's deposits and borrowings are its raw material, not "
+        "leverage on an operating business; an insurer's balance sheet is dominated by policy "
+        "reserves and investment portfolios this schema has no line items for. Running this "
+        "pipeline on a company in this range would not error -- it would silently produce a "
+        "complete-looking forecast built on numbers that don't mean what they'd appear to.")),
+)
+
+
+def check_industry_support(sic: int | None) -> str | None:
+    """Returns a refusal reason if this SIC code falls outside what this schema is
+    designed to model, else None. A missing/unknown SIC (None) is NOT refused -- an
+    absent classification isn't evidence of being out of scope, just missing metadata;
+    refuse only on a positive match against a known-incompatible range."""
+    if sic is None:
+        return None
+    for lo, hi, reason in EXCLUDED_SIC_RANGES:
+        if lo <= sic <= hi:
+            return reason
+    return None
 
 
 @dataclass(frozen=True)

@@ -173,6 +173,20 @@ def fetch_line_item(cik: int, item: LineItem,
     ]
 
 
+def fetch_company_metadata(cik: int, session: requests.Session | None = None) -> dict:
+    """Company name, SIC code, and SIC description from SEC's submissions endpoint --
+    used to check whether this schema's design (built around a Revenue -> COGS -> SG&A
+    -> Operating Income waterfall) actually fits the company being requested, before
+    spending ~20 tag-fetch requests on one that fundamentally won't work. See
+    companies.check_industry_support for what SIC ranges are excluded and why."""
+    sess = session or make_session()
+    url = f"https://data.sec.gov/submissions/CIK{cik:010d}.json"
+    resp = sess.get(url, headers=_headers(), timeout=REQUEST_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    data = resp.json()
+    return {"name": data.get("name"), "sic": data.get("sic"), "sic_description": data.get("sicDescription")}
+
+
 def fetch_all(cik: int, forms: tuple[str, ...] = ("10-K",)) -> dict[str, list[Observation]]:
     session = make_session()
     results: dict[str, list[Observation]] = {}

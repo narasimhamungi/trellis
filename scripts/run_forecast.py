@@ -14,13 +14,13 @@ import sys
 
 sys.path.insert(0, "src")  # run without PYTHONPATH set, for convenience
 
-from trellis.companies import get_profile
+from trellis.companies import check_industry_support, get_profile
 from trellis.forecast import (
     derive_drivers_from_history,
     reconcile_forecast_year,
     run_forecast,
 )
-from trellis.ingest import fetch_all
+from trellis.ingest import fetch_all, fetch_company_metadata
 from trellis.statements import (
     build_annual_table,
     fill_derived_gaps,
@@ -72,6 +72,10 @@ def main():
     parser.add_argument("--cik", type=int, required=True, help="SEC CIK number (no leading zeros)")
     parser.add_argument("--years", type=int, default=5, help="forecast horizon (default 5)")
     parser.add_argument("--lookback", type=int, default=5, help="trailing-average window (default 5)")
+    parser.add_argument("--force", action="store_true",
+                         help="proceed even if the company's SIC code falls outside this "
+                              "schema's supported industries (financial services) -- results "
+                              "will likely be numerically complete but economically meaningless")
     args = parser.parse_args()
 
     profile = get_profile(args.cik)
@@ -79,6 +83,22 @@ def main():
           f"FYE {profile.fiscal_year_end}) from SEC EDGAR...")
     if profile.notes:
         print(f"Registry notes: {profile.notes}")
+
+    # Fail fast, before spending ~20 tag-fetch requests: check whether this company's
+    # own business model even fits what this schema was built to model.
+    metadata = fetch_company_metadata(args.cik)
+    refusal = check_industry_support(metadata.get("sic"))
+    if refusal and not args.force:
+        print(f"\nRefusing: {metadata.get('name', 'this filer')} is SIC "
+              f"{metadata.get('sic')} ({metadata.get('sic_description', 'unknown')}).")
+        print(f"  {refusal}")
+        print("  Re-run with --force to proceed anyway (not recommended -- see above).")
+        return
+    if refusal and args.force:
+        print(f"\n--force set: proceeding despite SIC {metadata.get('sic')} "
+              f"({metadata.get('sic_description', 'unknown')}) being outside this schema's "
+              f"supported industries. Treat every number below as unvalidated for this "
+              f"business model, not just unvalidated for this specific company.")
 
     raw = fetch_all(args.cik)
     if raw.get("_missing"):
