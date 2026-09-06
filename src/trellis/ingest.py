@@ -184,7 +184,12 @@ def fetch_company_metadata(cik: int, session: requests.Session | None = None) ->
     resp = sess.get(url, headers=_headers(), timeout=REQUEST_TIMEOUT_SECONDS)
     resp.raise_for_status()
     data = resp.json()
-    return {"name": data.get("name"), "sic": data.get("sic"), "sic_description": data.get("sicDescription")}
+    sic_raw = data.get("sic")
+    sic = int(sic_raw) if sic_raw else None  # SEC returns this as a string ("3021"), not
+    # an int -- confirmed the hard way: every single run failed with a TypeError
+    # comparing int to str until this was caught. Empty string (some shell companies/
+    # funds have no SIC) is falsy, correctly becomes None rather than raising.
+    return {"name": data.get("name"), "sic": sic, "sic_description": data.get("sicDescription")}
 
 
 def fetch_all(cik: int, forms: tuple[str, ...] = ("10-K",)) -> dict[str, list[Observation]]:

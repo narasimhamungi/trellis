@@ -10,7 +10,7 @@ import os
 
 os.environ["TRELLIS_USER_AGENT"] = "Trellis-Tests/0.1 test@example.com"
 
-from trellis.ingest import _dedupe_restatements, fetch_line_item
+from trellis.ingest import _dedupe_restatements, fetch_company_metadata, fetch_line_item
 from trellis.schema import BY_NAME
 
 
@@ -148,3 +148,30 @@ def test_fetch_line_item_returns_empty_when_no_tag_matches():
     session = _FakeSession({})  # every URL 404s
     obs = fetch_line_item(320187, item, forms=("10-K",), session=session)
     assert obs == []
+
+
+def test_fetch_company_metadata_converts_sic_to_int():
+    """Real bug found the hard way: SEC returns sic as a string ('3021'), not an int --
+    every single run of the industry gate failed with a TypeError comparing int to str
+    until this was caught and fixed. Confirmed here so it can't silently regress."""
+    session = _FakeSession({
+        "https://data.sec.gov/submissions/CIK0000320187.json": _FakeResponse(
+            200, {"name": "NIKE, Inc.", "sic": "3021", "sicDescription": "Rubber & Plastics Footwear"},
+        ),
+    })
+    metadata = fetch_company_metadata(320187, session=session)
+    assert metadata["sic"] == 3021
+    assert isinstance(metadata["sic"], int)
+    assert metadata["name"] == "NIKE, Inc."
+
+
+def test_fetch_company_metadata_handles_empty_sic_as_none():
+    """Some shell companies/funds have no SIC at all -- an empty string, not a missing
+    key. int('') would raise; this must become None instead, not crash."""
+    session = _FakeSession({
+        "https://data.sec.gov/submissions/CIK0000999999.json": _FakeResponse(
+            200, {"name": "Some Fund", "sic": "", "sicDescription": None},
+        ),
+    })
+    metadata = fetch_company_metadata(999999, session=session)
+    assert metadata["sic"] is None
