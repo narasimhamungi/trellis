@@ -1,5 +1,6 @@
 from trellis.ingest import Observation
 from trellis.statements import (
+    BuildTableResult,
     build_annual_table,
     check_balance_sheet_balances,
     check_cash_flow_ties_to_cash,
@@ -9,10 +10,10 @@ from trellis.statements import (
 )
 
 
-def _obs(name, fy, val, fp="FY"):
+def _obs(name, fy, val, fp="FY", period_end=None, period_start=None):
     return Observation(canonical_name=name, matched_tag="x", fiscal_year=fy, fiscal_period=fp,
-                        period_end=f"{fy}-05-31", form="10-K", filed=f"{fy}-07-20",
-                        accession_number="acc", value=val, unit="USD")
+                        period_end=period_end or f"{fy}-05-31", period_start=period_start,
+                        form="10-K", filed=f"{fy}-07-20", accession_number="acc", value=val, unit="USD")
 
 
 # --- build_annual_table -----------------------------------------------------
@@ -24,10 +25,14 @@ def test_build_annual_table_filters_to_fy_and_keys_by_year():
         "total_assets": [_obs("total_assets", 2023, 500), _obs("total_assets", 2024, 550)],
         "_missing": ["some_tag"],  # sentinel from ingest.fetch_all -- must be skipped, not crash
     }
-    table = build_annual_table(observations)
+    result = build_annual_table(observations)
+    assert isinstance(result, BuildTableResult)
+    table = result.table
     assert set(table.keys()) == {2023, 2024}
     assert table[2024]["revenue"] == 110  # the quarterly observation didn't leak in
     assert table[2023]["total_assets"] == 500
+    assert result.fye_collisions == ()
+    assert result.stub_periods == ()
 
 
 def test_build_annual_table_keys_by_period_end_not_by_secs_fy_field():
@@ -44,10 +49,60 @@ def test_build_annual_table_keys_by_period_end_not_by_secs_fy_field():
         fiscal_period="FY", period_end="2017-05-31", form="10-K", filed="2019-07-23",
         accession_number="0000320187-19-000051", value=34_350_000_000, unit="USD",
     )
-    table = build_annual_table({"revenue": [mislabeled]})
+    table = build_annual_table({"revenue": [mislabeled]}).table
     assert 2017 in table  # keyed by the period it actually describes...
     assert 2019 not in table  # ...not by the filing's own mislabeled fy field
     assert table[2017]["revenue"] == 34_350_000_000
+
+
+def test_build_annual_table_drops_a_franken_year_collision_not_mixes_it():
+    """The real V4/F04 risk: a fiscal-year-end change can put two genuinely different
+    periods in the same calendar-year bucket. Latent, not yet triggered by any of the
+    four live companies validated so far (none has changed fiscal year-end) -- fixed
+    proactively rather than waiting for it to silently corrupt a fifth company's data.
+    Constructed here: 'revenue' reports period_end 2024-12-31 (the new, later FYE) while
+    'net_income' still reports the old 2024-06-30 FYE for the same calendar-year key --
+    without the fix, year=2024 would mix a revenue figure from one period with a
+    net_income figure from a genuinely different one."""
+    observations = {
+        "revenue": [_obs("revenue", 2023, 1000, period_end="2023-06-30"),
+                    _obs("revenue", 2024, 1100, period_end="2024-12-31")],  # new FYE
+        "net_income": [_obs("net_income", 2023, 100, period_end="2023-06-30"),
+                       _obs("net_income", 2024, 90, period_end="2024-06-30")],  # still old FYE
+    }
+    result = build_annual_table(observations)
+    assert "net_income" not in result.table.get(2024, {})  # dropped, not silently kept
+    assert result.table[2024]["revenue"] == 1100            # the authoritative (latest) period
+    assert len(result.fye_collisions) == 1
+    c = result.fye_collisions[0]
+    assert c.year == 2024 and c.canonical_name == "net_income"
+    assert c.dropped_period_end == "2024-06-30" and c.kept_period_end == "2024-12-31"
+
+
+def test_build_annual_table_flags_a_stub_transition_period():
+    """A 6-month transition period (fiscal-year-end change from June to December) filed
+    as its own 'FY' period -- real, valid data, but averaging it in as a normal year
+    would understate every flow-based ratio derived from it by roughly half."""
+    observations = {
+        "revenue": [_obs("revenue", 2024, 1000, period_end="2024-06-30", period_start="2023-07-01"),
+                    _obs("revenue", 2024, 550, period_end="2024-12-31", period_start="2024-07-01")],
+        # ^ two DIFFERENT periods both keying to year=2024 -- the 12-31 one wins as
+        # authoritative (later), and its ~184-day duration should flag as a stub.
+    }
+    result = build_annual_table(observations)
+    assert len(result.stub_periods) == 1
+    stub = result.stub_periods[0]
+    assert stub.year == 2024
+    assert stub.duration_days < 300  # roughly 184 days, well outside the ~300-400 band
+
+
+def test_build_annual_table_does_not_flag_a_normal_52_53_week_year_as_a_stub():
+    observations = {
+        "revenue": [_obs("revenue", 2024, 1000, period_end="2024-12-28", period_start="2023-12-31")],
+        # 363 days -- a normal 52-week fiscal year, not a transition stub
+    }
+    result = build_annual_table(observations)
+    assert result.stub_periods == ()
 
 
 # --- fill_derived_gaps (Assets-Equity identity, not a guess) ----------------

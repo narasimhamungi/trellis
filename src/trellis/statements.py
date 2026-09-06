@@ -19,6 +19,7 @@ pass/fail bucket would misrepresent what a failure means:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 
 from .ingest import Observation
 
@@ -34,7 +35,33 @@ class CheckResult:
     detail: str
 
 
-def build_annual_table(observations: dict[str, list[Observation]]) -> AnnualTable:
+@dataclass(frozen=True)
+class FyeCollision:
+    year: int
+    canonical_name: str
+    dropped_period_end: str
+    kept_period_end: str
+
+
+@dataclass(frozen=True)
+class StubPeriod:
+    year: int
+    period_end: str
+    duration_days: int
+
+
+@dataclass(frozen=True)
+class BuildTableResult:
+    table: AnnualTable
+    fye_collisions: tuple[FyeCollision, ...]
+    stub_periods: tuple[StubPeriod, ...]
+
+
+def _parse_date(s: str) -> date:
+    return date.fromisoformat(s)
+
+
+def build_annual_table(observations: dict[str, list[Observation]]) -> BuildTableResult:
     """FY-period observations only, keyed by the calendar year of period_end -- NOT by
     the SEC-reported fiscal_year field.
 
@@ -48,8 +75,26 @@ def build_annual_table(observations: dict[str, list[Observation]]) -> AnnualTabl
     period_end 2017-05-31) came back labeled fiscal_year=2019 -- correct value, correct
     period, wrong label, because the FY2019 10-K happened to be the last filing to
     include FY2017 as a trailing comparative. Keying off period_end sidesteps the
-    ambiguity entirely; deriving the calendar year from an ISO date is not."""
-    table: AnnualTable = {}
+    ambiguity entirely; deriving the calendar year from an ISO date is not.
+
+    Also guards against a franken-year: a fiscal-year-end change can put two genuinely
+    different periods in the same calendar-year bucket (e.g. a period ending 2024-06-30
+    and another ending 2024-12-31 both map to year=2024 under int(period_end[:4])).
+    Silently keeping whichever field a canonical_name's own obs_list happened to report
+    last would mix fields from two DIFFERENT periods under one year-key. Latent, not yet
+    triggered: none of the four companies validated so far have changed fiscal year-end.
+    Resolution: for each year, determine the single LATEST period_end seen across any
+    field, and accept only fields whose own period_end matches it -- every accepted
+    field for a given year comes from the same period, never mixed. Anything dropped for
+    disagreeing is reported in fye_collisions, not silently discarded.
+
+    Also flags stub/transition periods: a genuine annual period runs close to 365 days;
+    one whose duration falls well outside ~300-400 days (wide enough for 52/53-week
+    fiscal years) is likely a short transition period from a fiscal-year-end change,
+    filed as its own 'FY' period. Left IN the table -- the data is real -- but reported
+    separately in stub_periods so a caller can exclude it from trend/lookback averaging
+    rather than treating half a year of flow data as a normal one."""
+    authoritative_period_end: dict[int, str] = {}
     for canonical_name, obs_list in observations.items():
         if canonical_name == "_missing":
             continue
@@ -57,8 +102,35 @@ def build_annual_table(observations: dict[str, list[Observation]]) -> AnnualTabl
             if obs.fiscal_period != "FY":
                 continue
             year = int(obs.period_end[:4])
+            if year not in authoritative_period_end or obs.period_end > authoritative_period_end[year]:
+                authoritative_period_end[year] = obs.period_end
+
+    table: AnnualTable = {}
+    fye_collisions: list[FyeCollision] = []
+    duration_by_year: dict[int, int] = {}
+    for canonical_name, obs_list in observations.items():
+        if canonical_name == "_missing":
+            continue
+        for obs in obs_list:
+            if obs.fiscal_period != "FY":
+                continue
+            year = int(obs.period_end[:4])
+            if obs.period_end != authoritative_period_end[year]:
+                fye_collisions.append(FyeCollision(
+                    year=year, canonical_name=canonical_name,
+                    dropped_period_end=obs.period_end, kept_period_end=authoritative_period_end[year],
+                ))
+                continue
             table.setdefault(year, {})[canonical_name] = obs.value
-    return table
+            if obs.period_start and year not in duration_by_year:
+                duration_by_year[year] = (_parse_date(obs.period_end) - _parse_date(obs.period_start)).days
+
+    stub_periods = tuple(
+        StubPeriod(year=yr, period_end=authoritative_period_end[yr], duration_days=dur)
+        for yr, dur in duration_by_year.items()
+        if not (300 <= dur <= 400)
+    )
+    return BuildTableResult(table=table, fye_collisions=tuple(fye_collisions), stub_periods=stub_periods)
 
 
 @dataclass(frozen=True)

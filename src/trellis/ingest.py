@@ -70,6 +70,12 @@ class Observation:
     accession_number: str
     value: float
     unit: str
+    period_start: str | None = None  # ISO date; None for instant (balance-sheet) facts,
+    # which have no duration -- only duration facts (income statement, cash flow) carry
+    # this. Exists to detect stub/transition periods from a fiscal-year-end change: a
+    # genuine annual period runs ~365 days; a 6-month transition period filed as its own
+    # "FY" does not, and averaging it into a lookback window as if it were a normal year
+    # would understate every flow-based driver derived from it.
 
 
 def _headers() -> dict[str, str]:
@@ -154,6 +160,8 @@ def fetch_line_item(cik: int, item: LineItem,
             matched_tag=r["_tag"],
             fiscal_year=r["fy"],
             fiscal_period=r["fp"],
+            period_start=r.get("start"),  # absent for instant facts; SEC includes it
+            # directly on duration facts, no extra request needed
             period_end=r["end"],
             form=r["form"],
             filed=r["filed"],

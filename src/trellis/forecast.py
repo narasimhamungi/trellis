@@ -138,6 +138,7 @@ def derive_drivers_from_history(
     overrides: dict[str, tuple[float, str]] | None = None,
     dividend_policy: str = "growth_rate",
     capital_return_policy: str | None = None,
+    exclude_years: set[int] | None = None,
 ) -> Drivers:
     """Ratio-based drivers are averaged over the trailing `lookback_years` (default 5)
     ending at base_year -- not read off a single year. A single-year snapshot is fragile
@@ -179,17 +180,34 @@ def derive_drivers_from_history(
     silently defaulting -- an analyst manually researching and citing one input when the
     structured pull genuinely can't reach it is normal practice, general to any company,
     not specific to this one. Recorded in Drivers.overrides_applied, never silent.
+
+    `exclude_years`: years to drop from the lookback window entirely before computing
+    anything -- for stub/transition periods from a fiscal-year-end change (see
+    statements.build_annual_table's StubPeriod), where the period's duration isn't
+    close to a normal year, so averaging its flow-based ratios in as if it were one
+    would understate them. Excluding shrinks the effective window and is disclosed as
+    an assumption the same way a genuine data gap is, not silently absorbed.
     """
     if dividend_policy not in ("growth_rate", "payout_ratio"):
         raise ValueError(f"dividend_policy must be 'growth_rate' or 'payout_ratio', got {dividend_policy!r}")
     overrides = overrides or {}
-    years = sorted(y for y in range(base_year - lookback_years + 1, base_year + 1) if y in table)
+    exclude_years = exclude_years or set()
+    years = sorted(y for y in range(base_year - lookback_years + 1, base_year + 1)
+                   if y in table and y not in exclude_years)
     if not years:
         raise ValueError(f"No historical data at or before FY{base_year}")
 
     assumptions: list[str] = []
     overrides_applied: list[str] = []
-    if len(years) < lookback_years:
+    excluded_in_window = sorted(y for y in exclude_years
+                                 if base_year - lookback_years + 1 <= y <= base_year)
+    if excluded_in_window:
+        assumptions.append(
+            f"Excluded {excluded_in_window} from the lookback window (stub/transition "
+            f"period(s) -- duration not close to a normal year) -- averaged over the "
+            f"remaining {len(years)} year(s) instead."
+        )
+    if len(years) < lookback_years - len(excluded_in_window):
         assumptions.append(
             f"Requested {lookback_years}-yr lookback, only {len(years)} year(s) available "
             f"{years} -- averaged over what exists, not padded or extrapolated."

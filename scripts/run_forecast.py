@@ -40,7 +40,7 @@ def missing_fields(data):
     return missing
 
 
-def pick_base_year(table, max_staleness=5):
+def pick_base_year(table, stub_years=frozenset(), max_staleness=5):
     """Most recent year with everything the forecast needs -- but capped at
     `max_staleness` years behind the newest year with ANY data at all, rather than
     silently walking back an unbounded distance. Confirmed as a real failure mode
@@ -50,12 +50,18 @@ def pick_base_year(table, max_staleness=5):
     the identical failure), so the old version silently walked back to FY2009 -- a
     company with ~$24.5B revenue standing in for one with ~$638B today. Returns
     (year_or_None, newest_year_with_any_data) so the caller can report why a refusal
-    happened, not just that it did."""
+    happened, not just that it did.
+
+    stub_years are also skipped as a base-year candidate: a stub period's balance sheet
+    is a perfectly valid point-in-time snapshot, but its flow figures (revenue, capex,
+    dividends, ...) cover a truncated period, so bootstrapping the forecast's starting
+    scale from them would understate every flow-based figure the first forecast year
+    reads directly off the base year."""
     newest = max(table)
     for year in sorted(table, reverse=True):
         if newest - year > max_staleness:
             return None, newest
-        if not missing_fields(table[year]):
+        if year not in stub_years and not missing_fields(table[year]):
             return year, newest
     return None, newest
 
@@ -78,7 +84,22 @@ def main():
     if raw.get("_missing"):
         print(f"Tags never resolved for this filer (checked at ingest, not fatal): {raw['_missing']}")
 
-    table = build_annual_table(raw)
+    build_result = build_annual_table(raw)
+    table = build_result.table
+    if build_result.fye_collisions:
+        print(f"\nFYE-change collisions detected: {len(build_result.fye_collisions)} field(s) "
+              f"dropped because their period_end disagreed with the year's authoritative "
+              f"(latest) period -- likely a fiscal-year-end change:")
+        for c in build_result.fye_collisions[:5]:
+            print(f"  FY{c.year} {c.canonical_name}: dropped period_end={c.dropped_period_end}, "
+                  f"kept period_end={c.kept_period_end}")
+        if len(build_result.fye_collisions) > 5:
+            print(f"  ... and {len(build_result.fye_collisions) - 5} more")
+    if build_result.stub_periods:
+        print("\nNon-standard period duration detected (possible stub/transition period "
+              "from a fiscal-year-end change) -- excluded from driver averaging below:")
+        for s in build_result.stub_periods:
+            print(f"  FY{s.year} (period_end {s.period_end}): {s.duration_days} days, not ~365")
     derived = fill_derived_gaps(table)
     print(f"Derived (not reported) fields filled: {len(derived)} instances across {len(table)} years")
 
@@ -88,7 +109,8 @@ def main():
         gaps = missing_fields(table[year])
         print(f"  FY{year}: {'complete' if not gaps else 'missing ' + str(gaps)}")
 
-    base_year, newest_year = pick_base_year(table)
+    stub_years = {s.year for s in build_result.stub_periods}
+    base_year, newest_year = pick_base_year(table, stub_years=stub_years)
     if base_year is None:
         print(f"\nNo year within 5 years of the most recent data (FY{newest_year}) has "
               f"everything the forecast needs -- see gaps above. Refusing to silently fall "
@@ -108,6 +130,7 @@ def main():
 
     drivers = derive_drivers_from_history(
         table, base_year, lookback_years=args.lookback, overrides=profile.overrides,
+        exclude_years=stub_years,
     )
     print(f"\n--- Drivers derived from FY{drivers.years_used[0]}-FY{drivers.years_used[-1]} "
           f"({len(drivers.years_used)}-yr trailing average) ---")
