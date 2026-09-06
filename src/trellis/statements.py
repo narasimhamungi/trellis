@@ -81,20 +81,35 @@ def build_annual_table(observations: dict[str, list[Observation]]) -> BuildTable
     different periods in the same calendar-year bucket (e.g. a period ending 2024-06-30
     and another ending 2024-12-31 both map to year=2024 under int(period_end[:4])).
     Silently keeping whichever field a canonical_name's own obs_list happened to report
-    last would mix fields from two DIFFERENT periods under one year-key. Latent, not yet
-    triggered: none of the four companies validated so far have changed fiscal year-end.
-    Resolution: for each year, determine the single LATEST period_end seen across any
-    field, and accept only fields whose own period_end matches it -- every accepted
-    field for a given year comes from the same period, never mixed. Anything dropped for
-    disagreeing is reported in fye_collisions, not silently discarded.
+    last would mix fields from two DIFFERENT periods under one year-key. Resolution: for
+    each year, determine the single AUTHORITATIVE period_end across all fields, and
+    accept only fields whose own period_end matches it -- every accepted field for a
+    given year comes from the same period, never mixed. Anything dropped for disagreeing
+    is reported in fye_collisions, not silently discarded.
 
-    Also flags stub/transition periods: a genuine annual period runs close to 365 days;
-    one whose duration falls well outside ~300-400 days (wide enough for 52/53-week
-    fiscal years) is likely a short transition period from a fiscal-year-end change,
-    filed as its own 'FY' period. Left IN the table -- the data is real -- but reported
-    separately in stub_periods so a caller can exclude it from trend/lookback averaging
-    rather than treating half a year of flow data as a normal one."""
-    authoritative_period_end: dict[int, str] = {}
+    The authoritative period_end is chosen by DURATION closeness to 365 days, not by
+    which date is latest in the calendar year -- confirmed as a real, damaging bug from
+    the earlier 'latest date wins' version: SEC's own data contains short periods
+    (quarterly or half-year cumulative figures) spuriously tagged fp='FY' in early-XBRL-
+    era filings (roughly 2008-2019), a known real-world data-quality issue, not
+    something this code invented. When such a spurious short period's date happened to
+    fall LATER in the calendar year than the genuine annual period, 'latest wins' picked
+    the wrong one -- caught live: Nike FY2014 chose period_end=2014-11-30 (182 days)
+    over the real 2014-05-31 annual close, and Costco lost nearly every field for
+    FY2018-2019 the same way, choosing a spurious ~83-day November period over its real
+    ~August fiscal year end. Duration closeness to 365 days is the correct signal
+    because it's what actually distinguishes 'genuine annual period' from 'quarterly
+    figure mislabeled as annual', which recency of date does not.
+
+    Also flags stub/transition periods: even the correctly-chosen authoritative period
+    can genuinely be a short transition period from a real fiscal-year-end change (this
+    is the case duration-closeness can't rule out, since a true 6-month transition period
+    IS the only 'FY' period for that year -- there's no 365-day alternative to prefer
+    instead). One whose duration falls well outside ~300-400 days (wide enough for
+    52/53-week fiscal years) is reported separately in stub_periods so a caller can
+    exclude it from trend/lookback averaging rather than treating half a year of flow
+    data as a normal one."""
+    candidates: dict[int, dict[str, int | None]] = {}
     for canonical_name, obs_list in observations.items():
         if canonical_name == "_missing":
             continue
@@ -102,8 +117,23 @@ def build_annual_table(observations: dict[str, list[Observation]]) -> BuildTable
             if obs.fiscal_period != "FY":
                 continue
             year = int(obs.period_end[:4])
-            if year not in authoritative_period_end or obs.period_end > authoritative_period_end[year]:
-                authoritative_period_end[year] = obs.period_end
+            year_candidates = candidates.setdefault(year, {})
+            duration = None
+            if obs.period_start:
+                duration = (_parse_date(obs.period_end) - _parse_date(obs.period_start)).days
+            if year_candidates.get(obs.period_end) is None:
+                year_candidates[obs.period_end] = duration
+
+    authoritative_period_end: dict[int, str] = {}
+    for year, cands in candidates.items():
+        with_duration = {pe: d for pe, d in cands.items() if d is not None}
+        if with_duration:
+            authoritative_period_end[year] = min(with_duration, key=lambda pe: abs(with_duration[pe] - 365))
+        else:
+            # No duration-bearing fact for any candidate this year (e.g. only instant/
+            # balance-sheet facts ever hit it) -- nothing to judge duration by, so fall
+            # back to the latest date as a last resort, same as before.
+            authoritative_period_end[year] = max(cands)
 
     table: AnnualTable = {}
     fye_collisions: list[FyeCollision] = []

@@ -57,13 +57,14 @@ def test_build_annual_table_keys_by_period_end_not_by_secs_fy_field():
 
 def test_build_annual_table_drops_a_franken_year_collision_not_mixes_it():
     """The real V4/F04 risk: a fiscal-year-end change can put two genuinely different
-    periods in the same calendar-year bucket. Latent, not yet triggered by any of the
-    four live companies validated so far (none has changed fiscal year-end) -- fixed
-    proactively rather than waiting for it to silently corrupt a fifth company's data.
-    Constructed here: 'revenue' reports period_end 2024-12-31 (the new, later FYE) while
-    'net_income' still reports the old 2024-06-30 FYE for the same calendar-year key --
-    without the fix, year=2024 would mix a revenue figure from one period with a
-    net_income figure from a genuinely different one."""
+    periods in the same calendar-year bucket. Neither candidate here carries duration
+    info (no period_start), exercising the no-duration fallback path specifically --
+    the duration-based preference (see the test above) needs at least one candidate
+    with known duration to prefer; with none, this falls back to the latest date, same
+    as the original design. Constructed here: 'revenue' reports period_end 2024-12-31
+    (the new, later FYE) while 'net_income' still reports the old 2024-06-30 FYE for
+    the same calendar-year key -- without the fix, year=2024 would mix a revenue figure
+    from one period with a net_income figure from a genuinely different one."""
     observations = {
         "revenue": [_obs("revenue", 2023, 1000, period_end="2023-06-30"),
                     _obs("revenue", 2024, 1100, period_end="2024-12-31")],  # new FYE
@@ -79,21 +80,46 @@ def test_build_annual_table_drops_a_franken_year_collision_not_mixes_it():
     assert c.dropped_period_end == "2024-06-30" and c.kept_period_end == "2024-12-31"
 
 
-def test_build_annual_table_flags_a_stub_transition_period():
-    """A 6-month transition period (fiscal-year-end change from June to December) filed
-    as its own 'FY' period -- real, valid data, but averaging it in as a normal year
-    would understate every flow-based ratio derived from it by roughly half."""
+def test_build_annual_table_prefers_a_full_year_over_a_later_dated_spurious_short_period():
+    """The real bug found against live Nike and Costco data: a spurious short period
+    (a quarterly or half-year cumulative figure mislabeled fp='FY', a known real-world
+    XBRL data-quality issue in early-XBRL-era filings, roughly 2008-2019) can carry a
+    LATER date within the calendar year than the genuine annual period. The old 'latest
+    date wins' logic picked the wrong one -- confirmed live: Nike FY2014 chose a
+    182-day period (2014-11-30) over the real 365-day annual close (2014-05-31);
+    Costco lost nearly every field for FY2018-2019 the same way. Duration closeness to
+    365 days, not date recency, is what actually distinguishes a genuine annual period
+    from a mislabeled quarterly one."""
     observations = {
-        "revenue": [_obs("revenue", 2024, 1000, period_end="2024-06-30", period_start="2023-07-01"),
-                    _obs("revenue", 2024, 550, period_end="2024-12-31", period_start="2024-07-01")],
-        # ^ two DIFFERENT periods both keying to year=2024 -- the 12-31 one wins as
-        # authoritative (later), and its ~184-day duration should flag as a stub.
+        "revenue": [_obs("revenue", 2024, 1000, period_end="2024-05-31", period_start="2023-06-01"),
+                    # the genuine annual period: 365 days, EARLIER date
+                    _obs("revenue", 2024, 480, period_end="2024-11-30", period_start="2024-06-01")],
+                    # a spurious mislabeled ~half-year value: 183 days, LATER date
+    }
+    result = build_annual_table(observations)
+    assert result.table[2024]["revenue"] == 1000  # the genuine annual figure, not the spurious one
+    assert len(result.fye_collisions) == 1
+    assert result.fye_collisions[0].dropped_period_end == "2024-11-30"
+    assert result.stub_periods == ()  # the CHOSEN period is a normal year -- nothing to flag
+
+
+def test_build_annual_table_flags_a_stub_transition_period():
+    """A genuine 6-month transition period from a real fiscal-year-end change, with NO
+    competing full-year candidate for the same calendar-year key -- duration-based
+    selection prefers a full year when one is available (see the test above), but here
+    the stub IS the only 'FY' period reported for this year, so there's nothing better
+    to choose. Real data, correctly included -- just flagged so a caller can exclude it
+    from trend/lookback averaging rather than treating half a year as a normal one."""
+    observations = {
+        "revenue": [_obs("revenue", 2024, 550, period_end="2024-12-31", period_start="2024-07-01")],
     }
     result = build_annual_table(observations)
     assert len(result.stub_periods) == 1
     stub = result.stub_periods[0]
     assert stub.year == 2024
-    assert stub.duration_days < 300  # roughly 184 days, well outside the ~300-400 band
+    assert stub.duration_days < 300
+    assert result.table[2024]["revenue"] == 550  # still included -- the data is real
+    assert result.fye_collisions == ()  # nothing else competed for this year-key
 
 
 def test_build_annual_table_does_not_flag_a_normal_52_53_week_year_as_a_stub():
