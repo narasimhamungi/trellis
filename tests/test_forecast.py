@@ -618,3 +618,48 @@ def test_derive_drivers_gross_margin_falls_back_to_cost_of_revenue_when_gross_pr
     d = derive_drivers_from_history(years, base_year=2026, lookback_years=1)
     assert abs(d.gross_margin - 0.40) < 1e-9  # (1000-600)/1000, not silently 0.0
     assert not any("gross_margin" in a for a in d.assumptions)
+
+
+def test_project_year_debt_repayment_exceeding_balance_stays_reconciled():
+    """Real bug caught via external review, confirmed by direct code inspection before
+    trusting the claim: the balance sheet correctly floors long_term_debt at 0 when
+    debt_repayment exceeds what's outstanding, but CFF used the raw, un-floored driver
+    value -- a repayment of 150 against a balance of 100 meant the balance sheet
+    reflected a $100 reduction while CFF claimed $150 left the building, a genuine $50
+    internal contradiction that reconcile_forecast_year would correctly have failed on.
+    Hand-verified before writing this assertion: with the fix, CFO+CFI+CFF-implied cash
+    change is exactly 140 (240 NI - 100 actual repayment), matching the plug exactly."""
+    drivers = Drivers(
+        revenue_growth=0.0, gross_margin=0.50, sga_pct_revenue=0.20, tax_rate=0.20,
+        ar_days=0.0, inventory_days=0.0, ap_days=0.0, capex_pct_revenue=0.0, da_pct_revenue=0.0,
+        interest_rate=0.0, debt_repayment=150.0,  # exceeds the 100 outstanding below
+        dividend_payout_ratio=0.0, dividend_growth_rate=0.0, dividend_policy="payout_ratio",
+        capital_return_policy="none", cash_floor_pct_revenue=0.0,
+    )
+    prior = {
+        "revenue": 1000.0, "long_term_debt": 100.0, "ppe_net": 0.0,
+        "total_assets": 600.0, "total_liabilities": 200.0, "stockholders_equity": 400.0,
+        "cash_and_equivalents": 400.0, "accounts_receivable": 0.0, "inventory": 0.0,
+        "accounts_payable": 0.0, "retained_earnings": 400.0,
+    }
+    y = project_year(prior, drivers)
+    assert y["long_term_debt"] == 0.0  # floored correctly, unaffected by this fix
+    assert abs(y["cash_and_equivalents"] - 540.0) < 1e-6  # 400 + 140 implied change
+    result = reconcile_forecast_year(2027, y, prior_cash=prior["cash_and_equivalents"])
+    assert result.passed, result.detail  # would have failed by exactly 50 before the fix
+
+
+def test_derive_drivers_interest_rate_excludes_a_negative_debt_year():
+    """Real gap caught via external review, confirmed by direct code inspection: the old
+    guard used y.get('long_term_debt') as a plain truthiness check, which treats a
+    NEGATIVE balance as present the same as a positive one (Python truthiness only
+    excludes 0/None). Reported debt is never actually negative in real filings -- this
+    doesn't fire against any of the five registered companies -- but the guard should
+    say '> 0', not rely on that being incidentally true. Constructed so an included
+    negative-debt year would visibly corrupt the average if the guard failed."""
+    years = {
+        2024: {"revenue": 1000.0, "interest_expense": 20.0, "long_term_debt": 400.0},  # rate 0.05
+        2025: {"revenue": 1000.0, "interest_expense": -10.0, "long_term_debt": -50.0},  # excluded
+    }
+    d = derive_drivers_from_history(years, base_year=2025, lookback_years=2)
+    assert abs(d.interest_rate - 0.05) < 1e-9  # only the valid year -- not (0.05+0.20)/2

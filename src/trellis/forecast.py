@@ -379,7 +379,14 @@ def derive_drivers_from_history(
         overrides_applied.append(f"interest_rate = {interest_rate:.4f} -- {source}")
     else:
         rates = yearly(lambda y: y["interest_expense"] / y["long_term_debt"]
-                        if "interest_expense" in y and y.get("long_term_debt") else None)
+                        if "interest_expense" in y and y.get("long_term_debt", 0.0) > 0 else None)
+        # Explicit > 0, not a truthiness check: y.get("long_term_debt") on its own treats
+        # a NEGATIVE balance as truthy too (Python truthiness only excludes 0/None), which
+        # would silently admit a nonsensical negative-debt observation into the rate
+        # average. Reported debt is never actually negative in real filings -- this
+        # hasn't fired against any of the five registered companies -- but the guard
+        # should say what it means rather than rely on 0 being the only falsy number
+        # that happens to matter here.
         if rates:
             interest_rate = avg(rates, "interest_rate")
         else:
@@ -460,6 +467,17 @@ def project_year(prior: dict[str, float], drivers: Drivers) -> dict[str, float]:
     da = revenue * drivers.da_pct_revenue
     ppe_net = prior.get("ppe_net", 0.0) + capex - da
     long_term_debt = max(prior.get("long_term_debt", 0.0) - drivers.debt_repayment, 0.0)
+    # actual_debt_repayment, not drivers.debt_repayment, feeds CFF below. Real bug: the
+    # balance sheet floors debt at 0 (can't repay more than what's outstanding), but CFF
+    # used the raw, un-floored driver value -- if debt_repayment (150) exceeds the
+    # remaining balance (100), the balance sheet correctly reflects a $100 reduction
+    # while CFF claimed $150 left the building, a genuine $50 internal contradiction
+    # between how much cash the two statements agree was spent on debt service. Confirmed
+    # via reconcile_forecast_year: it would correctly fail on this, by exactly the
+    # mismatched amount, but the checks shouldn't have to catch a bug that's this cheap
+    # to prevent at the source. Currently latent -- every registered company uses the
+    # 0.0 default -- but a real defect for the first user who sets a repayment schedule.
+    actual_debt_repayment = min(drivers.debt_repayment, prior.get("long_term_debt", 0.0))
 
     # Dividend trajectory is tracked separately from the actual cash payment. Real bug,
     # confirmed by tracing the code: under the old version, a single loss year forced
@@ -568,7 +586,7 @@ def project_year(prior: dict[str, float], drivers: Drivers) -> dict[str, float]:
     cfo = net_income + da - (ar - prior.get("accounts_receivable", 0.0)) \
         - (inventory - prior.get("inventory", 0.0)) + (ap - prior.get("accounts_payable", 0.0))
     cfi = -capex
-    cff = -drivers.debt_repayment - dividends_paid - buybacks + revolver_draw - revolver_paydown
+    cff = -actual_debt_repayment - dividends_paid - buybacks + revolver_draw - revolver_paydown
 
     return {
         "revenue": revenue, "cost_of_revenue": cogs, "gross_profit": gross_profit,
