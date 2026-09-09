@@ -175,3 +175,91 @@ def test_fetch_company_metadata_handles_empty_sic_as_none():
     })
     metadata = fetch_company_metadata(999999, session=session)
     assert metadata["sic"] is None
+
+
+# --- merge_strategy="priority" (long_term_debt) -----------------------------
+
+def test_fetch_line_item_priority_strategy_prefers_higher_priority_tag_over_recency():
+    """The real gap found via external review, confirmed by direct code inspection:
+    LongTermDebtNoncurrent and LongTermDebt aren't aliases the way Nike's inventory
+    tags are -- a filer can report BOTH for the same period, representing genuinely
+    different scopes (excludes vs may include the current portion). 'Most recently
+    filed wins' is the right rule for resolving a restatement of the SAME concept; it's
+    a category error for choosing BETWEEN two different concepts. Constructed so the
+    LOWER-priority tag (LongTermDebt) is filed LATER than the higher-priority one
+    (LongTermDebtNoncurrent) -- if recency still controlled the outcome, the wrong
+    (broader) figure would win despite the schema's explicit preference."""
+    item = BY_NAME["long_term_debt"]
+    assert item.merge_strategy == "priority"
+    assert item.xbrl_tags == ("LongTermDebtNoncurrent", "LongTermDebt")
+
+    noncurrent_fixture = {"units": {"USD": [
+        {"end": "2026-05-31", "val": 5_942_000_000, "accn": "acc-a", "fy": 2026,
+         "fp": "FY", "form": "10-K", "filed": "2026-07-01"},  # filed EARLIER
+    ]}}
+    broader_fixture = {"units": {"USD": [
+        {"end": "2026-05-31", "val": 7_942_000_000, "accn": "acc-b", "fy": 2026,
+         "fp": "FY", "form": "10-K", "filed": "2026-08-01"},  # filed LATER -- would wrongly
+        # win under 'most recently filed' if priority weren't respected
+    ]}}
+    session = _FakeSession({
+        "https://data.sec.gov/api/xbrl/companyconcept/CIK0000320187/"
+        "us-gaap/LongTermDebtNoncurrent.json": _FakeResponse(200, noncurrent_fixture),
+        "https://data.sec.gov/api/xbrl/companyconcept/CIK0000320187/us-gaap/LongTermDebt.json":
+            _FakeResponse(200, broader_fixture),
+    })
+    obs = fetch_line_item(320187, item, forms=("10-K",), session=session)
+
+    assert len(obs) == 1
+    assert obs[0].value == 5_942_000_000  # the higher-priority (noncurrent-only) figure
+    assert obs[0].matched_tag == "LongTermDebtNoncurrent"
+
+
+def test_fetch_line_item_priority_strategy_falls_back_for_periods_the_top_tag_lacks():
+    """The priority tag doesn't have to cover every period -- a lower-priority tag can
+    still fill a genuine gap. Only competes-and-loses when both cover the SAME period."""
+    item = BY_NAME["long_term_debt"]
+    noncurrent_fixture = {"units": {"USD": [  # only covers 2025, not 2024
+        {"end": "2025-05-31", "val": 5_000_000_000, "accn": "acc-a", "fy": 2025,
+         "fp": "FY", "form": "10-K", "filed": "2025-07-01"},
+    ]}}
+    broader_fixture = {"units": {"USD": [  # covers both years
+        {"end": "2024-05-31", "val": 6_500_000_000, "accn": "acc-b", "fy": 2024,
+         "fp": "FY", "form": "10-K", "filed": "2024-07-01"},
+        {"end": "2025-05-31", "val": 7_000_000_000, "accn": "acc-c", "fy": 2025,
+         "fp": "FY", "form": "10-K", "filed": "2025-07-01"},
+    ]}}
+    session = _FakeSession({
+        "https://data.sec.gov/api/xbrl/companyconcept/CIK0000320187/"
+        "us-gaap/LongTermDebtNoncurrent.json": _FakeResponse(200, noncurrent_fixture),
+        "https://data.sec.gov/api/xbrl/companyconcept/CIK0000320187/us-gaap/LongTermDebt.json":
+            _FakeResponse(200, broader_fixture),
+    })
+    obs = fetch_line_item(320187, item, forms=("10-K",), session=session)
+    by_year = {o.period_end: o for o in obs}
+
+    assert len(obs) == 2
+    assert by_year["2024-05-31"].matched_tag == "LongTermDebt"  # only tag that covers 2024
+    assert by_year["2024-05-31"].value == 6_500_000_000
+    assert by_year["2025-05-31"].matched_tag == "LongTermDebtNoncurrent"  # covers 2025, wins it
+    assert by_year["2025-05-31"].value == 5_000_000_000  # NOT the broader tag's 7,000,000,000
+
+
+def test_fetch_line_item_priority_strategy_still_resolves_restatements_within_one_tag():
+    """Recency still matters WITHIN a single tag's own history -- priority only changes
+    how competing TAGS are chosen, not how a genuine restatement of the SAME tag's data
+    gets resolved."""
+    item = BY_NAME["long_term_debt"]
+    noncurrent_fixture = {"units": {"USD": [
+        {"end": "2025-05-31", "val": 5_100_000_000, "accn": "acc-old", "fy": 2025,
+         "fp": "FY", "form": "10-K", "filed": "2025-07-01"},
+        {"end": "2025-05-31", "val": 5_050_000_000, "accn": "acc-restated", "fy": 2025,
+         "fp": "FY", "form": "10-K/A", "filed": "2025-09-01"},  # a real restatement, later
+    ]}}
+    session = _FakeSession({
+        "https://data.sec.gov/api/xbrl/companyconcept/CIK0000320187/"
+        "us-gaap/LongTermDebtNoncurrent.json": _FakeResponse(200, noncurrent_fixture),
+    })
+    obs = fetch_line_item(320187, item, forms=("10-K",), session=session)
+    assert len(obs) == 1
+    assert obs[0].value == 5_050_000_000  # the restated figure, not the original

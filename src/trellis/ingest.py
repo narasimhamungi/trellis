@@ -114,6 +114,25 @@ def _dedupe_restatements(rows: list[dict]) -> list[dict]:
     return list(best.values())
 
 
+def _resolve_by_priority(rows: list[dict], tag_order: tuple[str, ...]) -> list[dict]:
+    """For 'priority' merge_strategy: the higher-priority tag wins any period it covers
+    at all, regardless of which tag's data was filed more recently -- filing recency
+    only resolves a restatement WITHIN a single tag's own history (via
+    _dedupe_restatements, applied per tag below), never decides BETWEEN two tags
+    representing different scopes. See schema.LineItem.merge_strategy for why this is
+    a different rule than 'alias' needs."""
+    by_period: dict[tuple[str, str], dict] = {}
+    for tag in tag_order:  # priority order: first tag with data for a period wins it
+        tag_rows = [r for r in rows if r["_tag"] == tag]
+        if not tag_rows:
+            continue
+        for row in _dedupe_restatements(tag_rows):
+            key = (row["end"], row.get("_unit", ""))
+            if key not in by_period:  # a higher-priority tag already claimed this period
+                by_period[key] = row
+    return list(by_period.values())
+
+
 def _form_matches(form: str, forms: tuple[str, ...]) -> bool:
     """A requested form like '10-K' must also accept its own amendments ('10-K/A').
     Filtering on exact form equality silently drops restatements -- the amendment
@@ -136,10 +155,18 @@ def fetch_line_item(cik: int, item: LineItem,
     used it), InventoryFinishedGoodsNetOfReserves has 32 (the years since). A
     'first tag with any data wins' rule would have permanently truncated the series to
     three years the moment InventoryNet returned anything at all -- which is exactly
-    the bug this replaced. Tag order no longer decides which value wins for a given
-    period (the merged dedup below does, by filed date); it's now just a list of known
-    aliases to check, and matched_tag on each Observation preserves which one actually
-    supplied it."""
+    the bug this replaced. For 'alias' items (the default), tag order no longer decides
+    which value wins for a given period -- most-recently-filed does, across all tags
+    merged together, because they're true synonyms and recency correctly resolves a
+    restatement of the same concept.
+
+    For 'priority' items, that same recency-wins rule is wrong: the tags represent
+    genuinely different scopes that can both be actively reported for the same period
+    (LongTermDebtNoncurrent vs LongTermDebt), so recency says nothing about which one
+    is intended. Order IS the preference there -- see _resolve_by_priority.
+
+    matched_tag on each Observation always preserves which tag actually supplied it,
+    regardless of strategy."""
     sess = session or make_session()
     all_rows: list[dict] = []
     for tag in item.xbrl_tags:
@@ -153,7 +180,8 @@ def fetch_line_item(cik: int, item: LineItem,
                 all_rows.append({**e, "_unit": unit, "_tag": tag})
     if not all_rows:
         return []
-    deduped = _dedupe_restatements(all_rows)
+    deduped = (_resolve_by_priority(all_rows, item.xbrl_tags) if item.merge_strategy == "priority"
+               else _dedupe_restatements(all_rows))
     return [
         Observation(
             canonical_name=item.canonical_name,

@@ -29,10 +29,26 @@ class Statement(Enum):
 class LineItem:
     canonical_name: str
     statement: Statement
-    xbrl_tags: tuple[str, ...]  # known aliases for this concept -- ALL are queried and
-    # merged (see ingest.fetch_line_item); order has no effect on which value wins for
-    # a given period, only on API call sequence
+    xbrl_tags: tuple[str, ...]  # candidate tags for this concept
     instant: bool  # True = point-in-time (balance sheet), False = period (flow)
+    merge_strategy: str = "alias"  # "alias" or "priority" -- see ingest.fetch_line_item
+    # "alias" (default): all tags are TRUE SYNONYMS of the same concept, used at
+    # different times by the same filer (Nike's inventory tag switching from
+    # InventoryNet to InventoryFinishedGoodsNetOfReserves ~FY2019 -- they never overlap
+    # for the same period). All tags are merged and, when two DO compete for the same
+    # period, the most-recently-filed value wins -- the right rule for resolving a
+    # restatement of the SAME concept. Order only affects API call sequence, never which
+    # value wins.
+    # "priority": tags represent GENUINELY DIFFERENT SCOPES that can both be actively
+    # reported for the SAME period -- LongTermDebtNoncurrent (excludes the current
+    # portion) vs LongTermDebt (may include it) are not aliases of each other the way
+    # the inventory tags are; a filer can tag both for the same year. "Most recently
+    # filed wins" is a category error here -- filing recency says nothing about which
+    # SCOPE is the intended one. Order IS the preference: xbrl_tags[0] wins for any
+    # period it covers at all, regardless of the other tag's filing date; a later tag
+    # only fills periods the higher-priority one doesn't cover. Recency still resolves
+    # genuine restatements WITHIN a single tag's own history, just never decides BETWEEN
+    # competing tags.
 
 
 # us-gaap taxonomy, in fallback priority order per canonical concept.
@@ -66,7 +82,14 @@ SCHEMA: tuple[LineItem, ...] = (
     LineItem("accounts_payable", Statement.BALANCE, ("AccountsPayableCurrent",), instant=True),
     LineItem("liabilities_current", Statement.BALANCE, ("LiabilitiesCurrent",), instant=True),
     LineItem("long_term_debt", Statement.BALANCE,
-             ("LongTermDebtNoncurrent", "LongTermDebt"), instant=True),
+             ("LongTermDebtNoncurrent", "LongTermDebt"), instant=True, merge_strategy="priority"),
+    # LongTermDebtNoncurrent (excludes the current portion) is preferred over LongTermDebt
+    # (may include it) whenever a filer reports both for the same period -- confirmed via
+    # external review that Nike, Amazon, and J&J all tag both, with different values
+    # (Nike FY2026: $5,942M noncurrent-only vs $7,942M under the broader tag). Treating
+    # these as simple aliases (the "alias" default) would let filing recency arbitrarily
+    # decide between two different economic scopes for a given period -- this is exactly
+    # the failure mode "priority" exists to prevent.
     LineItem("total_liabilities", Statement.BALANCE, ("Liabilities",), instant=True),
     LineItem("stockholders_equity", Statement.BALANCE,
              ("StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"),
