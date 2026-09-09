@@ -1,16 +1,27 @@
-# Running the live ingestion
+# Network requirements
 
-`src/trellis/ingest.py` calls `data.sec.gov` directly. That host isn't reachable from
-the sandboxed environment this project was scaffolded in, so `fetch_all()` has been
-built and tested against a synthetic fixture (`tests/test_ingest.py`) that mirrors the
-real API's shape, not run against Nike's live data yet.
+`ingest.py` calls `data.sec.gov` directly -- real HTTP requests to SEC's live XBRL API,
+no key required, no mocking. Two things SEC requires of every caller:
 
-To run it for real:
+1. **A descriptive `User-Agent` header** identifying who's asking -- not a security
+   measure, just SEC's own API etiquette. Set it before running anything:
 
-```bash
-export TRELLIS_USER_AGENT="Trellis/0.1 your.email@example.com"  # SEC requires this
-python3 -c "from trellis.ingest import fetch_all; print(fetch_all(320187))"
-```
+   ```bash
+   export TRELLIS_USER_AGENT="YourApp/0.1 your.email@example.com"
+   ```
 
-No API key needed. SEC's own guidance: <=10 requests/second; `ingest.py` already
-paces itself well under that.
+   `ingest.py` raises immediately if this isn't set, rather than sending an
+   unidentified request and getting a confusing failure downstream.
+
+2. **A reasonable request rate** -- SEC's own guidance is <=10 requests/second.
+   `ingest.py` paces itself well under that, and every request goes through a
+   retry-with-backoff session (`make_session()`), since a pull for one company can be
+   30-60+ individual requests and a single dropped connection shouldn't fail the whole
+   run.
+
+None of this is optional or mockable if you want real results -- the point of this
+project is that every number traces back to an actual filing, which means actually
+fetching from SEC. If you're running in a network-sandboxed environment (no route to
+`data.sec.gov`), the test suite still runs fully offline against synthetic fixtures
+shaped like real API responses (`tests/`), but `scripts/run_forecast.py` needs real
+network access to do anything.
