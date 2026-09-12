@@ -191,7 +191,13 @@ def test_fetch_line_item_priority_strategy_prefers_higher_priority_tag_over_rece
     (broader) figure would win despite the schema's explicit preference."""
     item = BY_NAME["long_term_debt"]
     assert item.merge_strategy == "priority"
-    assert item.xbrl_tags == ("LongTermDebtNoncurrent", "LongTermDebt")
+    assert item.xbrl_tags[:2] == ("LongTermDebtNoncurrent", "LongTermDebt")
+    # A third, wider tag sits below these two: LongTermDebtAndCapitalLeaseObligations,
+    # added because Medtronic and Boston Scientific tag NEITHER of the narrower forms.
+    # Asserted on the prefix rather than the whole tuple so this test keeps checking
+    # what it is actually about -- that the narrow tag outranks the broad one -- without
+    # failing every time a further fallback is appended below them.
+    assert item.xbrl_tags[2] == "LongTermDebtAndCapitalLeaseObligations"
 
     noncurrent_fixture = {"units": {"USD": [
         {"end": "2026-05-31", "val": 5_942_000_000, "accn": "acc-a", "fy": 2026,
@@ -214,6 +220,15 @@ def test_fetch_line_item_priority_strategy_prefers_higher_priority_tag_over_rece
     assert obs[0].value == 5_942_000_000  # the higher-priority (noncurrent-only) figure
     assert obs[0].matched_tag == "LongTermDebtNoncurrent"
 
+def test_long_term_debt_chain_includes_the_lease_inclusive_fallback_last():
+    """Medtronic and Boston Scientific tag neither LongTermDebtNoncurrent nor
+    LongTermDebt -- LongTermDebtAndCapitalLeaseObligations is their only noncurrent debt
+    disclosure, so without it both fail ingestion on a single missing field. It is a
+    WIDER scope (bundles finance-lease liabilities with borrowings), so it must stay
+    last: no filer tagging a narrower measure should ever be affected by its presence."""
+    item = BY_NAME["long_term_debt"]
+    assert item.xbrl_tags[-1] == "LongTermDebtAndCapitalLeaseObligations"
+    assert item.merge_strategy == "priority"
 
 def test_fetch_line_item_priority_strategy_falls_back_for_periods_the_top_tag_lacks():
     """The priority tag doesn't have to cover every period -- a lower-priority tag can

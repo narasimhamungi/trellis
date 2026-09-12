@@ -99,7 +99,9 @@ SCHEMA: tuple[LineItem, ...] = (
     LineItem("accounts_payable", Statement.BALANCE, ("AccountsPayableCurrent",), instant=True),
     LineItem("liabilities_current", Statement.BALANCE, ("LiabilitiesCurrent",), instant=True),
     LineItem("long_term_debt", Statement.BALANCE,
-             ("LongTermDebtNoncurrent", "LongTermDebt"), instant=True, merge_strategy="priority"),
+             ("LongTermDebtNoncurrent", "LongTermDebt",
+              "LongTermDebtAndCapitalLeaseObligations"),
+             instant=True, merge_strategy="priority"),
     # LongTermDebtNoncurrent (excludes the current portion) is preferred over LongTermDebt
     # (may include it) whenever a filer reports both for the same period -- confirmed via
     # external review that Nike, Amazon, and J&J all tag both, with different values
@@ -107,6 +109,17 @@ SCHEMA: tuple[LineItem, ...] = (
     # these as simple aliases (the "alias" default) would let filing recency arbitrarily
     # decide between two different economic scopes for a given period -- this is exactly
     # the failure mode "priority" exists to prevent.
+    #
+    # LongTermDebtAndCapitalLeaseObligations is LAST, and is a wider scope again: it
+    # bundles finance-lease liabilities in with borrowings. Added because Medtronic and
+    # Boston Scientific tag NEITHER of the narrower two -- it is their only noncurrent
+    # debt disclosure, so without it both companies fail ingestion entirely on a single
+    # missing field. The scope difference is small for both (MDT FY2026: $54M of finance
+    # leases against $26,173M total, 0.2%; BSX FY2025: $122M against $11,137M, 1.1%) and
+    # post-ASC 842 finance leases are genuinely debt-like obligations, so including them
+    # in a net-debt bridge is defensible rather than merely tolerable. Ordering it last
+    # means no filer that tags a narrower measure is ever affected.
+    
     LineItem("total_liabilities", Statement.BALANCE, ("Liabilities",), instant=True),
     LineItem("stockholders_equity", Statement.BALANCE,
              ("StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"),
