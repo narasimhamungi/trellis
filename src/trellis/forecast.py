@@ -49,6 +49,14 @@ class Drivers:
     interest_rate: float          # applied to beginning-of-year LT debt balance
     debt_repayment: float         # dollars/year; 0.0 = flat debt
     dividend_payout_ratio: float  # used only when dividend_policy == "payout_ratio"
+    rnd_pct_revenue: float = 0.0  # R&D as % of revenue. Defaults to 0.0 so filers
+    # with no R&D line (Costco, Nike) are unaffected, and every existing
+    # Drivers(...) construction keeps working unchanged. It must sit among the
+    # DEFAULTED fields: a defaulted field placed before a non-defaulted one raises
+    # TypeError at class-definition time, so the module won't even import.
+    # Kept separate from sga_pct_revenue because R&D and SG&A scale differently --
+    # a pharma company can hold SG&A flat while R&D tracks pipeline stage, and
+    # folding them into one ratio makes that invisible.
     dividend_growth_rate: float = 0.0     # used only when dividend_policy == "growth_rate"
     dividend_policy: str = "growth_rate"  # which of the two drivers above project_year uses
     capital_return_policy: str = "none"  # "sweep_to_buybacks" or "none"
@@ -304,6 +312,7 @@ def derive_drivers_from_history(
     gross_margins = yearly(lambda y: gross_profit_for_year(y) / y["revenue"]
                             if gross_profit_for_year(y) is not None and y.get("revenue") else None)
     sga_pcts = yearly(lambda y: ratio(y, "sga_expense", "revenue"))
+    rnd_pcts = yearly(lambda y: ratio(y, "rnd_expense", "revenue"))
     tax_rates = yearly(lambda y: y["income_tax_expense"] / (y["net_income"] + y["income_tax_expense"])
                         if "income_tax_expense" in y and "net_income" in y
                         and (y["net_income"] + y["income_tax_expense"]) else None)
@@ -429,6 +438,12 @@ def derive_drivers_from_history(
         revenue_growth=revenue_growth,
         gross_margin=avg(gross_margins, "gross_margin"),
         sga_pct_revenue=avg(sga_pcts, "sga_pct_revenue"),
+        # Only averaged when the filer actually reports R&D. avg() flags a missing-data
+        # assumption on an empty list, which is right for a ratio every filer should
+        # have (margins, tax) but wrong here: a company with no R&D line genuinely has
+        # no R&D, so 0.0 is the fact, not an assumption, and flagging it would bury the
+        # real assumptions under noise for every non-R&D company.
+        rnd_pct_revenue=avg(rnd_pcts, "rnd_pct_revenue") if rnd_pcts else 0.0,
         tax_rate=avg(tax_rates, "tax_rate"),
         ar_days=avg(ar_days_list, "ar_days"),
         inventory_days=avg(inv_days_list, "inventory_days"),
@@ -454,7 +469,12 @@ def project_year(prior: dict[str, float], drivers: Drivers) -> dict[str, float]:
     cogs = revenue * (1 - drivers.gross_margin)
     gross_profit = revenue - cogs
     sga = revenue * drivers.sga_pct_revenue
-    operating_income = gross_profit - sga
+    rnd = revenue * drivers.rnd_pct_revenue
+    # R&D is a separate operating expense, not part of SG&A. Omitting it here mirrored
+    # the same bug fixed in statements.fill_derived_gaps and left the forecast (and so
+    # the whole DCF) overstating EBIT by the full R&D amount even after the historical
+    # table was corrected -- the DCF output did not move by a cent until this was fixed.
+    operating_income = gross_profit - sga - rnd
     interest_expense = prior.get("long_term_debt", 0.0) * drivers.interest_rate
     pretax = operating_income - interest_expense
     tax = pretax * drivers.tax_rate
@@ -590,7 +610,7 @@ def project_year(prior: dict[str, float], drivers: Drivers) -> dict[str, float]:
 
     return {
         "revenue": revenue, "cost_of_revenue": cogs, "gross_profit": gross_profit,
-        "sga_expense": sga, "operating_income": operating_income,
+        "sga_expense": sga, "rnd_expense": rnd, "operating_income": operating_income,
         "interest_expense": interest_expense, "income_tax_expense": tax, "net_income": net_income,
         "accounts_receivable": ar, "inventory": inventory, "ppe_net": ppe_net,
         "cash_and_equivalents": cash_and_equivalents, "total_assets": total_assets,
