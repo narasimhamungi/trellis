@@ -181,6 +181,17 @@ def fill_derived_gaps(table: AnnualTable) -> list[DerivedField]:
     filled: list[DerivedField] = []
     for year in sorted(table):
         data = table[year]
+
+        if ("depreciation_amortization" not in data and "depreciation_only" in data):
+            # Filers that report no combined DD&A subtotal (AbbVie) tag PP&E depreciation
+            # and intangible amortization as separate lines. Summing them reconstructs the
+            # same scope the combined tag carries for filers that do report it -- verified
+            # against BMY, where 621 + 3,500 reconciles to its reported DD&A of 4,011.
+            amort = data.get("amortization_intangibles", 0.0)
+            data["depreciation_amortization"] = data["depreciation_only"] + amort
+            basis = ("depreciation_only + amortization_intangibles"
+                     if "amortization_intangibles" in data else "depreciation_only")
+            filled.append(DerivedField(year, "depreciation_amortization", basis))
         if "total_liabilities" not in data and "total_assets" in data and "stockholders_equity" in data:
             data["total_liabilities"] = data["total_assets"] - data["stockholders_equity"]
             filled.append(DerivedField(year, "total_liabilities", "total_assets - stockholders_equity"))

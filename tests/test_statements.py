@@ -323,6 +323,28 @@ def test_retained_earnings_rollforward_treats_absent_dividends_as_zero_not_missi
     result = check_retained_earnings_rollforward(2024, no_dividend_year, CLEAN_PRIOR)
     assert result.passed  # a non-dividend-paying filer shouldn't be penalized for lacking the tag
 
+# --- depriciation & amortization ---------------------------------------
+
+def test_depreciation_amortization_sums_split_components():
+    """Regression: AbbVie tags no combined DD&A, so the chain fell through to bare
+    Depreciation ($762M) and dropped $7,377M of intangible amortization, inflating its
+    EV/EBITDA to 32x. Note this sum approximates the combined tag, it does not equal it."""
+    table = {2025: {"revenue": 61_160.0, "depreciation_only": 762.0,
+                    "amortization_intangibles": 7_377.0}}
+    filled = fill_derived_gaps(table)
+    assert table[2025]["depreciation_amortization"] == pytest.approx(8_139.0)
+    da = [f for f in filled if f.canonical_name == "depreciation_amortization"][0]
+    assert "amortization_intangibles" in da.method
+
+
+def test_depreciation_amortization_not_derived_when_combined_tag_present():
+    """A filer reporting the combined subtotal must keep it -- never overwritten by the
+    split-component sum, which is only an approximation."""
+    table = {2025: {"depreciation_amortization": 4_011.0,
+                    "depreciation_only": 621.0, "amortization_intangibles": 3_500.0}}
+    fill_derived_gaps(table)
+    assert table[2025]["depreciation_amortization"] == pytest.approx(4_011.0)
+
 
 # --- orchestration -----------------------------------------------------------
 

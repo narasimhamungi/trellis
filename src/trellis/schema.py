@@ -126,8 +126,20 @@ SCHEMA: tuple[LineItem, ...] = (
              instant=False),
     LineItem("depreciation_amortization", Statement.CASHFLOW,
              ("DepreciationDepletionAndAmortization", "DepreciationAmortizationAndAccretionNet",
-              "DepreciationAndAmortization", "Depreciation"),
-             instant=False),
+              "DepreciationAndAmortization"),
+             instant=False, merge_strategy="priority"),
+    # Bare "Depreciation" REMOVED from this chain -- it is PP&E depreciation only, a
+    # different scope, not an alias. AbbVie tags no combined DD&A at all, so the old
+    # chain fell through to it and reported $762M against a true ~$8,139M, omitting
+    # $7,377M of acquired-intangible amortization and inflating its EV/EBITDA to 32x.
+    # Split out below and recombined in fill_derived_gaps instead.
+    # priority (not alias) because BMY tags both the combined and the bare tag for the
+    # same period with different values -- letting filing recency choose between two
+    # scopes is the same category error documented on long_term_debt.
+    LineItem("depreciation_only", Statement.CASHFLOW,
+             ("Depreciation",), instant=False),
+    LineItem("amortization_intangibles", Statement.CASHFLOW,
+             ("AmortizationOfIntangibleAssets",), instant=False),
     LineItem("dividends_paid", Statement.CASHFLOW,
              ("PaymentsOfDividendsCommonStock", "PaymentsOfDividends",
               "PaymentsOfOrdinaryDividends", "DividendsCommonStockCash"),
