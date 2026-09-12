@@ -1,3 +1,4 @@
+import pytest
 from trellis.ingest import Observation
 from trellis.statements import (
     BuildTableResult,
@@ -333,3 +334,35 @@ def test_run_all_checks_first_year_has_no_prior_so_soft_checks_report_insufficie
     soft = next(r for r in by_year_2023 if r.name == "cash_flow_ties_to_cash")
     assert hard.passed  # hard check doesn't need a prior year
     assert not soft.passed and "insufficient data" in soft.detail  # soft check correctly does
+
+# --- operating income derivation: R&D regression ----------------------------
+
+
+def test_operating_income_derivation_subtracts_rnd():
+    """Regression: the derivation omitted R&D, overstating J&J FY2025 operating income
+    by ~$17B (42.7% margin against a true ~24%). Latent on the originally validated
+    companies because they all tag OperatingIncomeLoss directly, so this branch never
+    executed for them; J&J tags it only through FY2014."""
+    table = {2025: {"revenue": 94_193.0, "gross_profit": 64_000.0,
+                    "sga_expense": 23_700.0, "rnd_expense": 17_200.0}}
+    filled = fill_derived_gaps(table)
+
+    assert table[2025]["operating_income"] == pytest.approx(23_100.0)
+    margin = table[2025]["operating_income"] / table[2025]["revenue"]
+    assert 0.15 < margin < 0.35, f"operating margin {margin:.1%} outside a sane band"
+
+    oi = [f for f in filled if f.canonical_name == "operating_income"][0]
+    assert "rnd_expense" in oi.method, (
+        "the method string must record that R&D was subtracted -- it is the only "
+        "signal distinguishing a complete derivation from a partial one")
+
+
+def test_operating_income_derivation_without_rnd_still_works():
+    """A filer with no R&D line must still derive, and the method string must not claim
+    R&D was subtracted when it wasn't."""
+    table = {2025: {"revenue": 100.0, "gross_profit": 30.0, "sga_expense": 10.0}}
+    filled = fill_derived_gaps(table)
+
+    assert table[2025]["operating_income"] == pytest.approx(20.0)
+    oi = [f for f in filled if f.canonical_name == "operating_income"][0]
+    assert "rnd_expense" not in oi.method

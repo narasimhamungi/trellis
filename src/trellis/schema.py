@@ -62,6 +62,23 @@ SCHEMA: tuple[LineItem, ...] = (
     LineItem("gross_profit", Statement.INCOME, ("GrossProfit",), instant=False),
     LineItem("sga_expense", Statement.INCOME,
              ("SellingGeneralAndAdministrativeExpense",), instant=False),
+    LineItem("rnd_expense", Statement.INCOME,
+             ("ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost",
+              "ResearchAndDevelopmentExpense"),
+             instant=False, merge_strategy="priority"),
+             
+    # ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost is preferred over the
+    # plain tag. J&J tags BOTH for the same period with the scopes inverted from what the
+    # names suggest: the "Excluding" tag carries its real R&D line ($14,665M FY2025) while
+    # the plain tag holds only the IPR&D charge ($109M). Surveyed against the five pharma
+    # peers: PFE and ABBV tag only the Excluding variant, MRK, BMY and ABT only the plain
+    # one, and none tags both. So priority order resolves all six correctly. A filer that
+    # tagged both with the conventional scopes (plain = total, Excluding = subset) would
+    # break this -- not observed in this set, but not ruled out generally.
+    # Known gap: the IPR&D charge is a real operating expense and is dropped here
+    # ($1,841M for J&J in FY2024, ~2% of revenue). "priority" chooses between tags, it
+    # cannot sum them; capturing both would need a new merge strategy.
+
     LineItem("operating_income", Statement.INCOME, ("OperatingIncomeLoss",), instant=False),
     LineItem("interest_expense", Statement.INCOME,
              ("InterestExpense", "InterestExpenseDebt", "InterestIncomeExpenseNet"), instant=False),

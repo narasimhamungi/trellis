@@ -211,8 +211,21 @@ def fill_derived_gaps(table: AnnualTable) -> list[DerivedField]:
             data["gross_profit"] = data["revenue"] - data["cost_of_revenue"]
             filled.append(DerivedField(year, "gross_profit", "revenue - cost_of_revenue"))
         if "operating_income" not in data and "gross_profit" in data and "sga_expense" in data:
-            data["operating_income"] = data["gross_profit"] - data["sga_expense"]
-            filled.append(DerivedField(year, "operating_income", "gross_profit - sga_expense"))
+            # SG&A is not the only operating expense category. Pharma filers report R&D
+            # as a separate line -- omitting it overstated J&J's FY2025 operating income
+            # by ~$17B (42.7% margin vs a true ~24%), and the same for every large-pharma
+            # peer. The bug was latent on the originally validated companies because they
+            # all tag OperatingIncomeLoss directly, so this derivation never fired for
+            # them; J&J tags it only through FY2014, which is why it surfaced here.
+            opex = data["sga_expense"] + data.get("rnd_expense", 0.0)
+            data["operating_income"] = data["gross_profit"] - opex
+            # The basis string branches deliberately: it records on the face of the output
+            # whether R&D was actually available. A missing rnd_expense is treated as 0.0,
+            # which is correct for a filer with no R&D but silently wrong for one whose
+            # R&D sits under a tag outside the chain -- this string is the only signal.
+            basis = ("gross_profit - sga_expense - rnd_expense"
+                     if "rnd_expense" in data else "gross_profit - sga_expense")
+            filled.append(DerivedField(year, "operating_income", basis))
         if "sga_expense" not in data and "gross_profit" in data and "operating_income" in data:
             # Not every filer tags a single consolidated SG&A line -- Amazon, for one,
             # reports Cost of sales, Fulfillment, Technology and content, Marketing, and
