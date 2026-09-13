@@ -89,14 +89,28 @@ SCHEMA: tuple[LineItem, ...] = (
     LineItem("cash_and_equivalents", Statement.BALANCE,
              ("CashAndCashEquivalentsAtCarryingValue",), instant=True),
     LineItem("accounts_receivable", Statement.BALANCE,
-             ("AccountsReceivableNetCurrent", "ReceivablesNetCurrent"), instant=True),
+             ("AccountsReceivableNetCurrent", "ReceivablesNetCurrent",
+              "AccountsNotesAndLoansReceivableNetCurrent"), instant=True),
+    # AccountsNotesAndLoansReceivableNetCurrent added for Boston Scientific, which tags
+    # neither of the narrower forms. The name suggests a wider scope (bundling customer
+    # financing notes/loans with trade receivables), which would make this a priority
+    # case like long_term_debt -- but the arithmetic rules that out: BSX's own
+    # AccountsReceivableGrossCurrent ($3,058M) minus AllowanceForDoubtfulAccountsReceivable
+    # ($132M) equals this tag exactly ($2,926M). That reconciliation means the tag IS
+    # BSX's standard net-receivable line, just named for their disclosure convention
+    # (medtech filers that finance equipment sales often report AR this way) -- a true
+    # alias, not a scope difference, so it belongs alongside the others, not gated
+    # behind a priority fallback.
     LineItem("inventory", Statement.BALANCE,
              ("InventoryNet", "InventoryFinishedGoodsNetOfReserves"), instant=True),
     LineItem("assets_current", Statement.BALANCE, ("AssetsCurrent",), instant=True),
     LineItem("ppe_net", Statement.BALANCE,
              ("PropertyPlantAndEquipmentNet",), instant=True),
     LineItem("total_assets", Statement.BALANCE, ("Assets",), instant=True),
-    LineItem("accounts_payable", Statement.BALANCE, ("AccountsPayableCurrent",), instant=True),
+    LineItem("accounts_payable", Statement.BALANCE,
+             ("AccountsPayableCurrent", "AccountsPayableTradeCurrent"), instant=True),
+    # AccountsPayableTradeCurrent added for Stryker, which tags no AccountsPayableCurrent
+    # at all -- true alias, not a scope difference, since no filer observed tags both.
     LineItem("liabilities_current", Statement.BALANCE, ("LiabilitiesCurrent",), instant=True),
     LineItem("long_term_debt", Statement.BALANCE,
              ("LongTermDebtNoncurrent", "LongTermDebt",

@@ -278,3 +278,16 @@ def test_fetch_line_item_priority_strategy_still_resolves_restatements_within_on
     obs = fetch_line_item(320187, item, forms=("10-K",), session=session)
     assert len(obs) == 1
     assert obs[0].value == 5_050_000_000  # the restated figure, not the original
+
+def test_accounts_payable_chain_includes_stryker_trade_variant():
+    item = BY_NAME["accounts_payable"]
+    assert "AccountsPayableTradeCurrent" in item.xbrl_tags
+
+
+def test_accounts_receivable_chain_includes_boston_scientific_variant():
+    """Confirmed via reconciliation, not assumed: BSX's gross receivable minus its
+    allowance for doubtful accounts equals this tag exactly (3,058 - 132 = 2,926),
+    proving it is a standard net-receivable figure despite the name suggesting a
+    wider scope that would need priority ordering instead of a plain alias."""
+    item = BY_NAME["accounts_receivable"]
+    assert "AccountsNotesAndLoansReceivableNetCurrent" in item.xbrl_tags
