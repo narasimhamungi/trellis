@@ -54,7 +54,7 @@ pip install -e ".[dev]"
 export TRELLIS_USER_AGENT="YourName/0.1 you@example.com"   # SEC requires this; see docs/NETWORK.md
 
 python scripts/run_forecast.py --cik 320187      # Nike
-pytest                                            # 80 tests, fully offline, no network needed
+pytest                                            # 87 tests, fully offline, no network needed
 ```
 
 `--cik` accepts any SEC CIK number. Five companies are pre-registered with researched,
@@ -84,7 +84,7 @@ Drivers → project_year() → 5-year forecast, cash-as-plug, two-sided financin
 Self-consistency check + companies.py's industry gate (refuses financial-sector SIC codes)
 ```
 
-Five modules, ~1,300 lines of source. No framework, no ORM, no database — a JSON cache
+Five modules, ~1,600 lines of source. No framework, no ORM, no database — a JSON cache
 of raw API pulls would be the only justified addition to the persistence layer, and
 even that's a "would help," not a "needs."
 
@@ -144,18 +144,43 @@ available for anyone who wants to see the garbage on purpose).
 
 ## Companies validated live, and what each one actually found
 
+**Five are registered with researched, cited overrides** (`src/trellis/companies.py`),
+validated to both tag-resolution correctness and driver precision:
+
 | Company | Industry | What broke first (and got fixed) |
 |---|---|---|
 | Nike (320187) | Footwear/apparel | The `fy`-mislabeling bug; the inventory tag switch; the duration-vs-recency period-keying bug |
 | Costco (909832) | Warehouse retail | Silent-zero `gross_margin`; special-dividend contamination (fixed via median) |
 | Amazon (1018724) | E-commerce/cloud | No consolidated SG&A tag (derived via `gross_profit − operating_income` instead); real revolver draws in the forecast under its actual capex intensity |
 | Apple (320193) | Consumer electronics | Zero missing tags, zero derived gaps — the cleanest validation of the five |
-| Johnson & Johnson (200406) | Pharma/healthcare | `StockholdersEquity` returns zero entries (needs the NCI variant); `dividends_paid` needed a non-standard tag despite being a 60-year dividend aristocrat |
+| Johnson & Johnson (200406) | Pharma/healthcare | `StockholdersEquity` returns zero entries (needs the NCI variant); `dividends_paid` needed a non-standard tag; **and**, discovered later while building [ValuationLab](https://github.com/narasimhamungi/valuationlab) — see below — `operating_income`'s derivation omitted R&D entirely, in both the historical table and, independently, the forecast engine |
 
-Five industries, five different failure modes, each one found on real data and closed
-with a general fix — not a company-specific patch. J&J in particular was added with
-**zero changes to the pipeline itself**, purely to test whether the architecture
-actually generalizes; it did, on the first real attempt, modulo the two tag gaps above.
+**Eight more were run live through the full pipeline** (ingestion → statements →
+driver-derivation → forecast) while building ValuationLab, a downstream project that
+consumes Trellis as a package dependency. These are **not** registered — every driver is
+auto-derived, unlike the five above — so they validate tag-resolution correctness, not
+driver precision. Two of them are why AbbVie's and Medtronic's numbers would otherwise be
+silently wrong:
+
+| Company | Sector | What broke first (and got fixed) |
+|---|---|---|
+| Pfizer (78003) | Pharma | Nothing — confirmed the R&D priority chain resolves unambiguously (tags only one of the two competing forms, so there's no conflict to arbitrate) |
+| Merck (310158) | Pharma | D&A resolved to the wrong of two competing tags under the old `alias` strategy — a real, silent error, found and fixed alongside AbbVie's bug below |
+| AbbVie (1551152) | Pharma | `depreciation_amortization` dropped $7.4B of acquired-intangible amortization entirely (reported $762M against a true ~$8.1B), inflating its EV/EBITDA to 32x — the reason the D&A chain uses `priority`, not `alias` |
+| Bristol-Myers Squibb (14272) | Pharma | Tags **both** competing D&A forms for the same period with different values — the exact scope-conflict case that proves `priority` merging is the correct rule here |
+| Medtronic (1613103) | MedTech | Tags neither of `long_term_debt`'s two standard forms — failed ingestion completely on this single field until a third, lease-inclusive fallback was added |
+| Becton Dickinson (10795) | MedTech | Nothing — no missing fields across the whole run |
+| Stryker (310764) | MedTech | Tags `AccountsPayableTradeCurrent` instead of the standard `AccountsPayableCurrent` — failed on this one field until added as an alias |
+| Boston Scientific (885725) | MedTech | Same `long_term_debt` gap as Medtronic, plus a separate `accounts_receivable` gap — the receivables tag looked like it might bundle in customer financing loans (a scope difference, not an alias), ruled out by reconciling it against the filer's own gross-receivable and allowance-for-doubtful-accounts figures before adding it |
+
+Thirteen companies validated across eight industries. Not every one broke something —
+Pfizer and Becton Dickinson confirmed the pipeline generalizes cleanly with zero fixes
+needed, which is exactly as informative as the ones that didn't. Every bug found was
+closed with a general fix, not a company-specific patch, and all eight new companies came
+from a single downstream project applying Trellis to two sectors — pharma and medtech —
+the original five never touched. The pattern across both waves: bugs the consumer/tech
+names never triggered were latent, not absent, and a different sector was what actually
+exercised them.
 
 ## Known limitations — stated plainly, not discovered by a reader
 
@@ -181,6 +206,14 @@ actually generalizes; it did, on the first real attempt, modulo the two tag gaps
   is only preserved at the point of ingestion, not threaded through to the forecast.
 - **Financial-sector companies are out of scope by design.** See the industry gate
   above — this isn't a gap to close, it's a different project.
+- **The R&D tag-priority fix drops the IPR&D charge.** `priority` chooses between two
+  competing tags, it can't sum them — for J&J this excludes a real ~$1.8B FY2024
+  operating expense (~2% of revenue). Capturing both would need a new merge strategy.
+- **The D&A split-component reconstruction is an approximation, not an identity**, for
+  filers with no combined DD&A tag (AbbVie). Verified against Bristol-Myers Squibb, which
+  tags all three components: summing them gives $4,121M against a reported $4,011M, a
+  2.7% overstatement — accepted because the alternative for AbbVie was a 90%
+  *understatement* ($762M against a true ~$8.1B), not because the sum is exact.
 
 ## Testing philosophy
 
@@ -194,7 +227,7 @@ caught a real algebra error before it shipped (an equity-roll formula that cance
 zero algebraically, a debt-repayment figure that didn't match between the balance
 sheet and the cash flow statement) — not because a linter or a type checker found them.
 
-80 tests, fully offline (synthetic fixtures shaped like real API responses — no network
+87 tests, fully offline (synthetic fixtures shaped like real API responses — no network
 needed to run the suite), organized as: one clean fixture + one deliberately broken
 fixture per structural check, a regression test for every real bug found on live data,
 and hand-computed expected values wherever the arithmetic isn't trivial.
